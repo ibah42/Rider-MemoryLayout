@@ -1,0 +1,38 @@
+<idea-plugin>
+    <id>com.memorylayout</id>
+    <name>Memory Layout</name>
+    <vendor email="ibah42@gmail.com">ivv</vendor>
+
+    <description><![CDATA[
+    Shows how a C# type resides in memory: every field with its offset and size, and the padding
+    bytes between them, the way the C++ memory layout view does.<br/><br/>
+    Right-click a type in the editor and pick <b>Memory Layout</b>. Nested structs expand in
+    place with absolute offsets; the header says how big the type is, how it is aligned, how much
+    of it is padding, and whether it can be blitted.<br/><br/>
+    Nothing runs and no debugger is needed: the layout is computed from the source text.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="Memory Layout"
+                    anchor="right"
+                    canCloseContents="true"
+                    icon="AllIcons.Toolwindows.ToolWindowStructure"
+                    factoryClass="com.memorylayout.ui.MemoryLayoutToolWindowFactory"/>
+        <applicationConfigurable
+                parentId="tools"
+                id="com.memorylayout.settings"
+                instance="com.memorylayout.settings.MemoryLayoutConfigurable"
+                displayName="Memory Layout"/>
+    </extensions>
+
+    <actions>
+        <action id="MemoryLayout.Show"
+                class="com.memorylayout.actions.ShowMemoryLayoutAction"
+                text="Memory Layout"
+                description="Show how the type under the caret sits in memory">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>
