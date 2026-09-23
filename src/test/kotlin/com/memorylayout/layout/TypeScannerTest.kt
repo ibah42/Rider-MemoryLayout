@@ -177,4 +177,68 @@ class TypeScannerTest {
         assertEquals(1, declarations.size)
         assertTrue(declarations.single().bodyEnd > declarations.single().bodyStart)
     }
+
+    // PlayerLoopHelper.cs in UniTask: `#endif` right above `namespace` hid every type in the file,
+    // PlayerLoopTiming among them, so a field of that enum type came out unresolved.
+    @Test
+    fun aDirectiveAboveTheNamespaceDoesNotHideItsTypes() {
+        val declarations = scan(
+            """
+            #if UNITY_EDITOR
+            using UnityEditor;
+            #endif
+
+            namespace Game.Loop
+            {
+                public enum Timing
+                {
+                    Update = 0,
+            #if UNITY_2020_2_OR_NEWER
+                    TimeUpdate = 1,
+            #endif
+                }
+            }
+            """
+        )
+        assertEquals(listOf("Game.Loop.Timing"), declarations.map { declaration -> declaration.qualifiedName })
+    }
+
+    @Test
+    fun aByteOrderMarkDoesNotHideTheNamespace() {
+        val declarations = scan("\uFEFFnamespace Game\n{\n    struct Point { int x; }\n}\n")
+        assertEquals(listOf("Game.Point"), declarations.map { declaration -> declaration.qualifiedName })
+    }
+
+    @Test
+    fun aByteOrderMarkInFrontOfADirectiveStillStartsTheLine() {
+        val declarations = scan("\uFEFF#pragma warning disable CS1591\nnamespace Game\n{\n    struct Point { int x; }\n}\n")
+        assertEquals(listOf("Game.Point"), declarations.map { declaration -> declaration.qualifiedName })
+    }
+
+    @Test
+    fun aRegionBetweenFieldsIsNotPartOfTheNextField() {
+        val layout = layoutOf(
+            """
+            struct Sample
+            {
+                #region Position
+                public float x;
+                public float y;
+                #endregion
+                public int flags;
+            }
+            """,
+            "Sample",
+        )
+        assertEquals(listOf("x", "y", "flags"), fieldNames(layout))
+    }
+
+    @Test
+    fun aHashInsideAStringIsNotADirective() {
+        val layout = layoutOf(
+            "struct Tag\n{\n    string text = \"#if\";\n    char mark = '#';\n    int value;\n}\n",
+            "Tag",
+        )
+        assertEquals(listOf("text", "mark", "value"), fieldNames(layout))
+    }
 }

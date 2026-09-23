@@ -2,6 +2,7 @@ package com.memorylayout.index
 
 import com.memorylayout.layout.CodeMask
 import com.memorylayout.layout.DeclaredType
+import com.memorylayout.layout.PartialTypes
 import com.memorylayout.layout.TypeDeclaration
 import com.memorylayout.layout.TypeKind
 import com.memorylayout.layout.TypeMatching
@@ -40,7 +41,40 @@ data class IndexedType(
     val fileUrl: String,
     val filePresentableName: String,
     val declarationOffset: Int,
-)
+
+    /** One part of a type spread over several declarations; see [com.memorylayout.layout.PartialTypes]. */
+    val isPartial: Boolean = false,
+
+    /**
+     * What the type's parameters are bound to when it was opened from a variable: `int` for a
+     * `List<int> ids`. Empty for the open declaration.
+     */
+    val typeArguments: List<String> = emptyList(),
+) {
+    /** `List<int>` for a bound generic, the plain name otherwise: what a tab is titled. */
+    val displayName: String
+        get() {
+            if (typeArguments.isEmpty()) {
+                return simpleName
+            }
+            return simpleName + "<" + typeArguments.joinToString(", ") + ">"
+        }
+
+    /** One tab per instantiation: `List<int>` and `List<float>` are different layouts. */
+    val tabKey: String
+        get() = qualifiedName + "<" + typeArguments.joinToString(",") + ">" + arity
+
+    /** Whether this and [other] are parts of the same partial type, by the rule the engine uses. */
+    fun isPartOfSameType(other: IndexedType): Boolean {
+        if (!isPartial || !other.isPartial) {
+            return false
+        }
+        if (kind != other.kind || arity != other.arity) {
+            return false
+        }
+        return qualifiedName == other.qualifiedName
+    }
+}
 
 /**
  * Knows which C# types the project declares and where.
@@ -125,8 +159,24 @@ class TypeIndexService(private val project: Project) : Disposable {
         }
     }
 
-    /** Reads the declaration back out of its file, ready for the engine. */
+    /**
+     * Reads the declaration back out of its file, ready for the engine. A partial type comes back
+     * whole: every part the index knows of, read from its own file.
+     */
     fun declaredTypeOf(entry: IndexedType): DeclaredType? {
+        if (!entry.isPartial) {
+            return partOf(entry)
+        }
+        val parts = candidates(entry.simpleName)
+            .filter { candidate -> candidate.isPartOfSameType(entry) }
+            .mapNotNull { candidate -> partOf(candidate) }
+        if (parts.isEmpty()) {
+            return partOf(entry)
+        }
+        return PartialTypes.merge(parts)
+    }
+
+    private fun partOf(entry: IndexedType): DeclaredType? {
         val file = VirtualFileManager.getInstance().findFileByUrl(entry.fileUrl) ?: return null
         val masked = maskedSourceOf(file) ?: return null
         val declarations = TypeScanner.scan(masked)
@@ -198,6 +248,7 @@ class TypeIndexService(private val project: Project) : Disposable {
             fileUrl = file.url,
             filePresentableName = file.name,
             declarationOffset = declaration.declarationOffset,
+            isPartial = declaration.isPartial,
         )
         entriesBySimpleName.getOrPut(entry.simpleName) { ArrayList() }.add(entry)
     }
@@ -258,7 +309,9 @@ class TypeIndexService(private val project: Project) : Disposable {
         val baseDirectory = project.baseDirectory() ?: return emptyList()
         val scope = MemoryLayoutSettings.getInstance().indexScope
         if (scope == IndexScope.WHOLE_PROJECT) {
-            return listOf(baseDirectory)
+            val roots = arrayListOf(baseDirectory)
+            addPackageCache(baseDirectory, roots)
+            return roots
         }
         val roots = ArrayList<VirtualFile>()
         val assets = baseDirectory.findChild(ASSETS_DIRECTORY)
@@ -270,12 +323,26 @@ class TypeIndexService(private val project: Project) : Disposable {
             if (packages != null) {
                 roots.add(packages)
             }
+            addPackageCache(baseDirectory, roots)
         }
         if (roots.isEmpty()) {
             // Not a Unity project after all: walking the whole thing beats indexing nothing.
             return listOf(baseDirectory)
         }
         return roots
+    }
+
+    /**
+     * A package pulled in through the manifest -- a registry, a git URL -- has no sources under
+     * `Packages/`, only a line in `manifest.json`. Unity unpacks it into `Library/PackageCache`,
+     * and that is the only place its types can be read. The rest of `Library` stays ignored: it is
+     * thousands of generated files, none of them anybody's declarations.
+     */
+    private fun addPackageCache(baseDirectory: VirtualFile, roots: MutableList<VirtualFile>) {
+        val packageCache = baseDirectory.findFileByRelativePath(PACKAGE_CACHE_PATH) ?: return
+        if (packageCache.isDirectory) {
+            roots.add(packageCache)
+        }
     }
 
     private fun Project.baseDirectory(): VirtualFile? {
@@ -290,6 +357,12 @@ class TypeIndexService(private val project: Project) : Disposable {
     private fun isIgnoredDirectory(file: VirtualFile): Boolean {
         if (!file.isDirectory) {
             return false
+        }
+        // Unity itself skips a folder ending in `~` (`Samples~`, `Documentation~`) and a hidden
+        // one. A package's samples declare the same types as the package, and reading them would
+        // put a second, never-compiled copy of every one of them into the index.
+        if (file.name.endsWith(UNITY_HIDDEN_SUFFIX) || file.name.startsWith(UNITY_HIDDEN_PREFIX)) {
+            return true
         }
         return file.name in IGNORED_DIRECTORIES
     }
@@ -331,6 +404,12 @@ class TypeIndexService(private val project: Project) : Disposable {
         private const val ASSETS_DIRECTORY = "Assets"
 
         private const val PACKAGES_DIRECTORY = "Packages"
+
+        private const val PACKAGE_CACHE_PATH = "Library/PackageCache"
+
+        private const val UNITY_HIDDEN_SUFFIX = "~"
+
+        private const val UNITY_HIDDEN_PREFIX = "."
 
         /** Unity and build leftovers: thousands of files, none of them the project's own sources. */
         private val IGNORED_DIRECTORIES = setOf(

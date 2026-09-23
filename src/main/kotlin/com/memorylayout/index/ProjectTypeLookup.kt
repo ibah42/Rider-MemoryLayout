@@ -18,14 +18,27 @@ class ProjectTypeLookup(private val index: TypeIndexService) : TypeLookup {
         return index.declaredTypeOf(best)
     }
 
-    /** Every declaration the written name could mean, most likely first. */
+    /**
+     * Every type the written name could mean, most likely first.
+     *
+     * A partial type is offered once, however many files declare it: eleven `UniTask` lines in the
+     * chooser would be eleven ways of asking for the same layout.
+     */
     fun rankedCandidates(typeName: String, context: LookupContext): List<IndexedType> {
-        return index.candidates(typeName)
+        val ranked = index.candidates(typeName)
             .filter { entry ->
                 TypeMatching.matches(entry.simpleName, entry.qualifiedName, entry.arity, typeName)
             }
             .sortedByDescending { entry ->
                 TypeMatching.score(entry.namespaceName, entry.containerNames, context, entry.fileUrl)
             }
+        val distinct = ArrayList<IndexedType>()
+        for (entry in ranked) {
+            val alreadyOffered = distinct.any { offered -> offered.isPartOfSameType(entry) }
+            if (!alreadyOffered) {
+                distinct.add(entry)
+            }
+        }
+        return distinct
     }
 }

@@ -280,6 +280,11 @@ The shape of the thing:
   **absolute** offsets. The table is one view of that tree; a cache-line view and anything else
   drawn later read the same tree rather than asking the engine for a second shape. Keep view
   decisions -- colours, column order, wording -- out of `layout/`.
+- **Never let `JTable` lay the columns out.** Outside a drag, `JTable.doLayout` spreads the spare
+  width over every column in proportion whatever the resize mode, which is what kept undoing the
+  narrow numeric columns. `LayoutTreeTable.layoutColumns` does it instead, from each column's
+  preferred width, and a drag writes the width back into the preference. Column widths are stored
+  per project (`MemoryLayoutProjectSettings`), the application value being only the default.
 - **The target, the cache line and the column widths live in `ui/MemoryLayoutViewState.kt`,
   not in a panel.** Every tab listens and every change is written to the settings on the spot. Two
   tabs on different targets would be two tabs whose numbers cannot be compared, which is the
@@ -305,6 +310,27 @@ The shape of the thing:
   takes the lowest offset in the layout as its origin for exactly this reason, and
   `cacheLineText` measures the span from there. The offsets themselves stay reference-relative,
   which is what every debugger reports and what the table shows.
+- **`metadata/` is pure too, and writes C# rather than building layouts.** It reads the ECMA-335
+  tables of an assembly and turns each type back into the declaration it was compiled from
+  (`MetadataSourceWriter`), so the engine reads BCL and UnityEngine types exactly the way it reads
+  source. Do not grow a second path through the engine for metadata: anything the writer cannot
+  express as C# is a gap in the writer. Field types are written namespace-qualified on purpose --
+  the project's index answers first (`CompositeTypeLookup`), and a bare `Entry` would find the
+  project's own. `MetadataReaderTest` needs a real runtime `mscorlib.dll`, which cannot be
+  committed: point `MEMORY_LAYOUT_MSCORLIB` at
+  `<Editor>/Data/MonoBleedingEdge/lib/mono/unityjit-win32/mscorlib.dll`.
+- **Never read the framework from the assemblies the `.csproj` names.** Unity hands the compiler
+  reference assemblies (`NetStandard/ref`, `UnityReferenceAssemblies/*-api`); their private fields
+  are gone and their structs are one placeholder `int`. `ProjectReferences` swaps them for Mono's
+  runtime assemblies from the same install. ReSharper's backend reads the reference ones, which is
+  why its model is not the source of fields for these types either.
+- **A variable's type is found by scoping, not by the nearest match.** `VariableTypes` walks back
+  from the use and accepts a declaration only if its scope reaches the use: the enclosing brace
+  block, or for parentheses of a method, lambda, `for`, `foreach`, `using` or `catch` the body that
+  follows them; an `out`/pattern variable inside a call or an `if` belongs to the enclosing block.
+  A `?` or `*` counts as part of a type only when written attached (`int?`), which is what keeps
+  `flag ? x : y` and `a * b` from reading as declarations; `a > x` is rejected by the backwards
+  angle match stopping at operators. Each of these has a test -- keep it that way.
 - **`bool` and `char` are sized but not blittable.** `TypeMetrics.blittableProblem` is how that is
   reported; a size alone would quietly lie to anyone building a `NativeArray`.
 - **`indexOfTopLevel` tests the match before counting the character.** Otherwise the `(` that opens

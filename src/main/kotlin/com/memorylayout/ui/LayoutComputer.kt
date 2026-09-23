@@ -2,6 +2,9 @@ package com.memorylayout.ui
 
 import com.memorylayout.index.IndexedType
 import com.memorylayout.index.ProjectTypeLookup
+import com.memorylayout.index.RuntimeAssemblyService
+import com.memorylayout.layout.DeclaredType
+import com.memorylayout.metadata.CompositeTypeLookup
 import com.memorylayout.index.TypeIndexService
 import com.memorylayout.layout.LayoutEngine
 import com.memorylayout.layout.LayoutNode
@@ -15,9 +18,20 @@ object LayoutComputer {
 
     fun compute(project: Project, entry: IndexedType, target: LayoutTarget): TypeLayout? {
         val index = TypeIndexService.getInstance(project)
-        val declared = index.declaredTypeOf(entry) ?: return null
-        val engine = LayoutEngine(target, ProjectTypeLookup(index))
-        return engine.layoutOf(declared)
+        val runtime = RuntimeAssemblyService.getInstance(project)
+        val declared: DeclaredType?
+        if (runtime.isRuntimeEntry(entry)) {
+            declared = runtime.declaredTypeOf(entry)
+        } else {
+            declared = index.declaredTypeOf(entry)
+        }
+        if (declared == null) {
+            return null
+        }
+        // The project answers first: its own `Entry` is the one its code means. The assemblies
+        // answer for everything it does not declare -- `Guid`, `List<T>`, `Vector3`.
+        val lookup = CompositeTypeLookup(listOf(ProjectTypeLookup(index), runtime.lookup()))
+        return LayoutEngine(target, lookup).layoutOf(declared, entry.typeArguments)
     }
 
     /** The layout as plain text, for the clipboard. */

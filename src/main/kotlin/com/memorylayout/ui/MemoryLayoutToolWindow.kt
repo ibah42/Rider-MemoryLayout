@@ -75,7 +75,7 @@ class MemoryLayoutToolWindowService(private val project: Project) {
             return
         }
         val panel = MemoryLayoutPanel(project, entry)
-        val content = ContentFactory.getInstance().createContent(panel, entry.simpleName, false)
+        val content = ContentFactory.getInstance().createContent(panel, entry.displayName, false)
         content.isCloseable = true
         content.setDisposer(panel)
         content.description = entry.qualifiedName
@@ -98,7 +98,7 @@ class MemoryLayoutToolWindowService(private val project: Project) {
 
     private fun findTabOf(contentManager: ContentManager, entry: IndexedType): Content? {
         return contentManager.contents.firstOrNull { content ->
-            (content.component as? MemoryLayoutPanel)?.typeQualifiedName == entry.qualifiedName
+            (content.component as? MemoryLayoutPanel)?.tabKey == entry.tabKey
         }
     }
 

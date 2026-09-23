@@ -21,11 +21,17 @@ data class LookupContext(
  *
  * @param maskedSource the masked text of the file holding [declaration]; the engine reads the
  *   fields straight out of it, so whoever resolves a name has to hand it over with the declaration
+ * @param parts every declaration of a partial type, each with its own file, in the order their
+ *   fields are laid out; empty for a type declared once. See [PartialTypes].
+ * @param notes what whoever produced the declaration knows and the source text cannot say -- that
+ *   it was read from an assembly, or that a string's characters follow its last field
  */
 data class DeclaredType(
     val declaration: TypeDeclaration,
     val maskedSource: String,
     val fileId: String = "",
+    val parts: List<DeclaredType> = emptyList(),
+    val notes: List<String> = emptyList(),
 )
 
 /**
@@ -175,6 +181,18 @@ class SourceTypeLookup(
         if (best == null) {
             return null
         }
-        return DeclaredType(best, maskedSource, fileId)
+        return declaredTypeOf(best)
+    }
+
+    /** The declaration ready for the engine, with the other parts of a partial type put back. */
+    fun declaredTypeOf(declaration: TypeDeclaration): DeclaredType {
+        val own = DeclaredType(declaration, maskedSource, fileId)
+        if (!declaration.isPartial) {
+            return own
+        }
+        val parts = declarations
+            .filter { candidate -> PartialTypes.sameType(candidate, declaration) }
+            .map { part -> DeclaredType(part, maskedSource, fileId) }
+        return PartialTypes.merge(parts)
     }
 }

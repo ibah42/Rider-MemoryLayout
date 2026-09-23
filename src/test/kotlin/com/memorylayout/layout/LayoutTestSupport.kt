@@ -14,7 +14,7 @@ object LayoutTestSupport {
         val lookup = SourceTypeLookup(masked, TEST_FILE_ID)
         val declaration = lookup.allDeclarations().firstOrNull { candidate -> candidate.name == typeName }
             ?: throw AssertionError("no type named $typeName in the test source")
-        return LayoutEngine(target, lookup).layoutOf(DeclaredType(declaration, masked, TEST_FILE_ID))
+        return LayoutEngine(target, lookup).layoutOf(lookup.declaredTypeOf(declaration))
     }
 
     /** The node of the field with this name, at any depth. */

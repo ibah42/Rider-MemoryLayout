@@ -336,6 +336,54 @@ object SourceText {
         return -1
     }
 
+    /**
+     * Where [name] itself stands in the member declaration that starts at [statementStart], or
+     * [statementStart] when it cannot be found.
+     *
+     * A field remembers where its statement begins, which is its first attribute or modifier; a
+     * reader who clicks a row wants the caret on the name. The last match before the declaration
+     * ends is taken, not the first: in `Vector3 Vector3;` the first one is the type.
+     */
+    fun nameOffsetInStatement(masked: String, statementStart: Int, name: String): Int {
+        if (statementStart < 0 || statementStart >= masked.length || name.isEmpty()) {
+            return statementStart
+        }
+        var end = statementStart
+        var depth = 0
+        while (end < masked.length && !endsDeclarationAt(masked[end], depth)) {
+            when (masked[end]) {
+                '(', '[' -> {
+                    depth++
+                }
+                ')', ']' -> {
+                    depth = maxOf(depth - 1, 0)
+                }
+                else -> {
+                    // Part of the declaration.
+                }
+            }
+            end++
+        }
+        var found = -1
+        var index = indexOfWord(masked, name, statementStart)
+        while (index in statementStart until end) {
+            found = index
+            index = indexOfWord(masked, name, index + 1)
+        }
+        if (found < 0) {
+            return statementStart
+        }
+        return found
+    }
+
+    /** A positional record's `;` sits after its parameter list, so only depth 0 ends anything. */
+    private fun endsDeclarationAt(character: Char, depth: Int): Boolean {
+        if (depth > 0) {
+            return false
+        }
+        return character == ';' || character == '{' || character == '=' || character == '}'
+    }
+
     fun collapseWhitespace(text: String): String {
         val builder = StringBuilder(text.length)
         var previousWasSpace = false

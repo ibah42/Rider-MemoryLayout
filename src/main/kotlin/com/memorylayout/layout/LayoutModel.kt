@@ -84,6 +84,13 @@ data class FieldDeclaration(
     val explicitOffset: Int = NO_EXPLICIT_OFFSET,
     val fixedBufferLength: Int = 0,
     val isAutoProperty: Boolean = false,
+
+    /**
+     * Which file [declarationOffset] is an offset into. Empty until the field is read through a
+     * [DeclaredType]: the parts of a partial type sit in different files, so the type's own file
+     * is not enough to navigate to one of its fields.
+     */
+    val fileId: String = "",
 ) {
     companion object {
         const val NO_EXPLICIT_OFFSET = -1

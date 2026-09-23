@@ -13,17 +13,49 @@ object FieldReader {
     private val DROPPED_MODIFIERS = setOf(
         "public", "private", "protected", "internal", "file",
         "static", "readonly", "volatile", "unsafe", "new", "required", "extern",
-        "ref", "partial", "sealed", "override", "virtual", "abstract", "async",
+        "ref", "partial", "sealed", "override", "virtual", "abstract", "async", "event",
     )
 
-    /** A member carrying one of these is not part of an instance at all. */
-    private val EXCLUDING_MODIFIERS = setOf("const", "static", "event")
+    /**
+     * A member carrying one of these is not part of an instance at all.
+     *
+     * `event` is not among them: a field-like `event Action Died;` is a delegate field the
+     * compiler writes, eight bytes in every instance. Only an event with `add` and `remove`
+     * stores nothing, and that one has a body, which is what drops it.
+     */
+    private val EXCLUDING_MODIFIERS = setOf("const", "static")
+
+    /**
+     * A property with one of these has no backing field even when its accessors look automatic:
+     * an abstract or extern one has no implementation here, and a partial one's accessors are
+     * written in its other declaration.
+     */
+    private val NO_STORAGE_PROPERTY_MODIFIERS = setOf("abstract", "extern", "partial")
+
+    private const val INDEXER_KEYWORD = "this"
 
     private val ACCESSOR_NAMES = setOf("get", "set", "init")
 
     private const val FIXED_KEYWORD = "fixed"
 
     private const val DEFAULT_ENUM_UNDERLYING_TYPE = "int"
+
+    /**
+     * The fields of a type as the compiler sees it: every part of a partial type, in the order of
+     * [DeclaredType.parts], each field carrying the file it was read from.
+     */
+    fun readFields(type: DeclaredType): List<FieldDeclaration> {
+        if (type.parts.isEmpty()) {
+            return readFields(type.maskedSource, type.declaration).map { field -> field.copy(fileId = type.fileId) }
+        }
+        val fields = ArrayList<FieldDeclaration>()
+        for (part in type.parts) {
+            for (field in readFields(part.maskedSource, part.declaration)) {
+                fields.add(field.copy(fileId = part.fileId))
+            }
+        }
+        return fields
+    }
 
     fun readFields(masked: String, declaration: TypeDeclaration): List<FieldDeclaration> {
         if (declaration.kind == TypeKind.INTERFACE || declaration.kind == TypeKind.ENUM) {
@@ -128,13 +160,20 @@ object FieldReader {
         if (hasExcludingModifier(collapsed)) {
             return null
         }
-        // A `(` means a method or an indexer; a type keyword means a nested type. Neither has a
-        // backing field of its own.
+        // A `(` means a method; a type keyword means a nested type. Neither has a backing field
+        // of its own.
         if (SourceText.indexOfTopLevel(collapsed, '(') >= 0) {
             return null
         }
-        if (SourceText.indexOfTopLevel(collapsed, '[') >= 0) {
+        // An indexer is `this[...]`. Any other `[` is an array type -- `int[] Values { get; }` is
+        // an auto-property like any other, and was once dropped for the bracket alone.
+        if (SourceText.containsWord(collapsed, INDEXER_KEYWORD) && collapsed.contains('[')) {
             return null
+        }
+        for (modifier in NO_STORAGE_PROPERTY_MODIFIERS) {
+            if (SourceText.containsWord(collapsed, modifier)) {
+                return null
+            }
         }
         if (looksLikeTypeDeclaration(collapsed)) {
             return null

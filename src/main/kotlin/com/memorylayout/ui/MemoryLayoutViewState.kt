@@ -2,11 +2,14 @@ package com.memorylayout.ui
 
 import com.memorylayout.layout.CacheLineMath
 import com.memorylayout.layout.LayoutTarget
+import com.memorylayout.settings.MemoryLayoutProjectSettings
 import com.memorylayout.settings.MemoryLayoutSettings
+import com.intellij.openapi.project.Project
 import com.memorylayout.settings.WindowBackground
 
 /**
- * The settings every open tab shares: the target, the cache line, the column widths.
+ * The settings every open tab shares: the target, the cache line, the column widths (those per
+ * project, see [MemoryLayoutProjectSettings]).
  *
  * These are not properties of a type, they are properties of the way the reader is looking at
  * types right now. Switching to 32-bit in one tab and leaving another on 64-bit would mean two
@@ -174,9 +177,18 @@ object MemoryLayoutViewState {
         }
     }
 
-    /** The stored width of a column, or [NO_STORED_WIDTH] when the reader never dragged it. */
-    fun columnWidthOf(columnId: String): Int {
-        for (entry in MemoryLayoutSettings.getInstance().columnWidths.split(ENTRY_SEPARATOR)) {
+    /**
+     * The stored width of a column, or [NO_STORED_WIDTH] when the reader never dragged it.
+     *
+     * The project's own widths first; a project that has none yet starts from the widths last
+     * dragged anywhere, rather than from nothing.
+     */
+    fun columnWidthOf(project: Project, columnId: String): Int {
+        var text = MemoryLayoutProjectSettings.getInstance(project).columnWidths
+        if (text.isEmpty()) {
+            text = MemoryLayoutSettings.getInstance().columnWidths
+        }
+        for (entry in text.split(ENTRY_SEPARATOR)) {
             val separator = entry.indexOf(VALUE_SEPARATOR)
             if (separator <= 0) {
                 continue
@@ -193,13 +205,20 @@ object MemoryLayoutViewState {
         return NO_STORED_WIDTH
     }
 
-    fun rememberColumnWidths(widths: Map<String, Int>, source: Any?) {
+    /**
+     * Stores what the reader dragged, for this project and as the default for the next one, and
+     * tells every open tab. A tab of another project is told too; it reads its own project's
+     * widths back and finds nothing changed.
+     */
+    fun rememberColumnWidths(project: Project, widths: Map<String, Int>, source: Any?) {
         val text = widths.entries.joinToString(ENTRY_SEPARATOR) { entry ->
             entry.key + VALUE_SEPARATOR + entry.value
         }
-        if (text == MemoryLayoutSettings.getInstance().columnWidths) {
+        val projectSettings = MemoryLayoutProjectSettings.getInstance(project)
+        if (text == projectSettings.columnWidths) {
             return
         }
+        projectSettings.columnWidths = text
         MemoryLayoutSettings.getInstance().columnWidths = text
         for (listener in listeners.toList()) {
             listener.columnWidthsChanged(source)

@@ -1,5 +1,172 @@
 # Changelog
 
+## 1.0.4 -- properties and events that take room
+
+Found by a new suite, `PropertyStorageTest`, that goes through every shape of property and event
+and asks one question of each: does the compiler give it a backing field?
+
+- **An array auto-property is stored.** `public int[] Values { get; set; }` was dropped from the
+  layout: any `[` in the header was taken for an indexer. Only `this[...]` is one now.
+- **A field-like event is stored.** `public event Action Died;` is a delegate field the compiler
+  writes -- eight bytes in every instance -- and `event` was on the list of modifiers that exclude a
+  member, so it vanished and every field after it moved up by eight. An event with `add`/`remove`
+  still stores nothing, and a static one still does not count.
+- **An abstract property is not stored.** `public abstract float Area { get; }` has automatic-looking
+  accessors and no backing field; it was laid out as one. The same now holds for `extern` and for
+  the declaring half of a `partial` property.
+- Confirmed as already right, and now under test: `get;`/`init;`/`private set;`/`readonly get;`,
+  `required`, an initializer after the accessors, `[field: SerializeField]`, generic types, a
+  virtual auto-property and its override (two backing fields), computed and expression-bodied
+  properties, static ones, indexers, an interface's properties.
+
+## 1.0.3 -- column widths that stay put
+
+- **The numeric columns stay narrow, and a dragged width holds in every tab.** The cause was
+  `JTable` itself: `AUTO_RESIZE_LAST_COLUMN` only applies while a column is being dragged. Every
+  other layout -- a new tab, a window resize, a scrollbar -- spreads the spare width over all six
+  columns in proportion, so a 25-pixel size column came out at 114 (measured on a plain `JTable`
+  900 px wide). The widths the plugin set were preferences that got spread away, which also
+  looked like "the other tabs ignore my drag". The table now lays itself out: every column but
+  the name at exactly its width, the name column taking the rest. A drag also moves the column's
+  preference with it, or the next layout would put it back.
+- **Numbers take the room of their digits:** three characters minimum for `hex`, `dec`, `sz` and
+  `al`, more only when this type's numbers need it -- a dragged width is kept unless a number
+  would be clipped. The `size` and `align` titles are now `sz` and `al` so the title fits three
+  characters.
+- **The type column is wider** -- it fits names up to 64 characters (was 28), and starts at 20 --
+  and the name column takes whatever is left.
+- **Widths are stored per project**, in the workspace file (`MemoryLayoutProjectSettings`); a
+  project with none yet starts from the widths last dragged anywhere. The application-wide value
+  moved to a new key (`columnWidths3`) because the old one holds the bloated widths described
+  above, and reading it back would have brought them back.
+
+## 1.0.2 -- a row opens its declaration
+
+- **One click on a row shows where the field is declared.** Navigation used to need a double
+  click, which the tree also takes as "fold or unfold", so it read as not working. A plain click
+  now opens the file at the field and leaves the focus in the window, so the next row can be
+  clicked straight away; a double click opens it and moves the focus to the editor. A click with
+  Ctrl, Shift or Cmd only changes the selection, as before.
+- **The caret lands on the field's name**, not on the start of its statement -- which was its
+  first attribute or modifier, often a line above the name. `SourceText.nameOffsetInStatement`
+  takes the last match before the declaration ends, so `Vector3 Vector3;` lands on the field and
+  not on its type, and a positional record's parameter or an auto-property's name is found too.
+- A field read from an assembly (`List<T>._items`, anything from UnityEngine) has no source file,
+  and a click on it does nothing.
+- The version line jumped from 0.5.2 to 1.0.1 without a changelog entry in between; whatever that
+  release contained is not described here.
+
+## 0.5.2 -- a variable opens its type
+
+- **The caret on a variable opens the type it was declared with.** Before, the name under the
+  caret was only ever looked up as a type, so `position` or `enemy` found nothing. Now
+  `layout/VariableTypes.kt` finds the declaration the way C# scoping would -- the enclosing blocks
+  first, then the members of the enclosing types and their base classes -- and opens the type
+  written there: locals, parameters, `for`/`foreach`/`using`/`catch` variables, lambda parameters,
+  `out` and pattern variables (which leak into the enclosing block, as in C#), fields, properties
+  and methods. A name that is itself a type still opens that type.
+- **Member access is followed.** `enemy.health.value`, `this.body`, `transform.position`,
+  `GetComponent<Rigidbody>()` -- each step is typed from the previous one, a generic owner's
+  arguments bound (`Box<Enemy>.value` is an `Enemy`), a generic method's too. For that the metadata
+  reader now also reads properties and method return types (`PropertyMap`, `Property`,
+  `MethodDef`), written into the synthesized declarations with bodies so the field reader keeps
+  ignoring them and layouts do not change.
+- **`var` is typed where the text says what it is:** `new T(...)`, a cast, `as T`, `default(T)`,
+  `stackalloc`, a literal (`5f` is a `float`, read from the unmasked text because the mask blanks
+  literals), a variable or member chain, and `foreach (var x in ...)` over an array, a `List`-like
+  collection or a dictionary (`KeyValuePair<K, V>`). Anything else -- `var x = a + b` -- says so in
+  a popup instead of guessing.
+- **A generic variable opens that instantiation.** `List<int> ids` opens `List<int>`, with `T`
+  bound to `int` in every field; its tab is titled that way and is separate from `List<float>`.
+  An array opens its element type, `T?` opens `T`.
+- Checked with 27 tests of scoping and false positives (`a > x`, `flag ? x : y`, a parameter of
+  another method, text in comments and strings) and 4 more through metadata-shaped UnityEngine types.
+
+## 0.5.1 -- preprocessor directives
+
+- **A type below a `#endif` is found again.** `PlayerLoopTimer.playerLoopTiming` showed as
+  `PlayerLoopTiming ?` with no size: the enum sits in UniTask's `PlayerLoopHelper.cs`, where the
+  `using` block ends in `#endif` right above `namespace Cysharp.Threading.Tasks`. Directives were
+  not masked, so `#endif` became the first word of the namespace header, the header no longer
+  started with `namespace`, and the whole namespace -- every type in the file -- was skipped.
+  `CodeMask` now blanks a directive line whole (`#if`, `#endif`, `#region Fields`, `#pragma ...`)
+  whenever the `#` is the first thing on its line. The code between `#if` and `#endif` is still
+  read, every branch of it: the mask cannot know which symbols are defined.
+- **A byte order mark no longer starts the first statement.** It is not whitespace to Kotlin, so a
+  file read from disk that opens with `namespace Foo {` got a header that did not start with the
+  word, the same failure as above.
+- Tests: a directive above the namespace, a BOM before `namespace` and before `#pragma`, a
+  `#region` between fields, and a `#` inside a string or a character literal. All 106 `layout/`
+  tests pass; `PlayerLoopHelper.cs` itself now yields `PlayerLoopTiming`,
+  `InjectPlayerLoopTimings`, `IPlayerLoopItem` and `PlayerLoopHelper`.
+
+## 0.5.0 -- types without source
+
+- **`string`, `List<T>`, `Guid`, `Vector3` and every other type the project does not declare can be
+  opened.** They are read from the metadata of the assemblies the project compiles against: a new
+  `metadata/` package reads the ECMA-335 tables (fields, `ClassLayout`, `FieldLayout`, nesting,
+  generic parameters, field signatures) and writes each type back out as the C# declaration it was
+  compiled from, which the engine then reads like any other source -- `[StructLayout]`,
+  `[FieldOffset]`, auto-properties and nested generics included, with no second engine to drift.
+  Opening `Color32` now shows `rgba` overlaying `r`, `g`, `b`, `a`; `RaycastHit` is 44 B; a project
+  struct holding a `Matrix4x4`, a `Guid` and a `RaycastHit` is sized exactly instead of approximately.
+- **The runtime's assemblies, not the ones the compiler is shown.** A Unity project references
+  `NetStandard/ref/2.1.0/netstandard.dll` (and `UnityReferenceAssemblies/unity-4.8-api` for the
+  editor assemblies): reference assemblies whose `List<T>` has no fields and whose `Guid`,
+  `DateTime` and `decimal` are a single placeholder `int`. Laying those out would have produced
+  confident, wrong numbers. They are replaced with Mono's own `mscorlib`, `System` and `System.Core`
+  from the same editor install (`MonoBleedingEdge/lib/mono/unityjit-*`), which is also the layout
+  the game actually runs with. Every other `HintPath` -- UnityEngine modules, package DLLs -- is
+  read as it is; `Library/ScriptAssemblies` (stale copies of the project's own code) and
+  `UnityEditor*` (editor-only, tens of megabytes) are skipped.
+- **The project still answers first.** A name is looked up in the sources, and only when they do
+  not declare it in the assemblies. Types written out from metadata name their field types with
+  their namespaces, so the BCL's `Dictionary.Entry` never resolves to a project's own `Entry`.
+- **A keyword opens its framework type.** With the caret on `string` or `int`, the window shows
+  `System.String` or `System.Int32`. For a string, a note says the characters continue in the same
+  object after the last field.
+- Checked against the real Mono `mscorlib.dll` of Unity 6000.0.62f1: 3022 types read in about
+  130 ms, the instance fields of every one of them identical to an independent reader's.
+
+## 0.4.2 -- packages, and partial types
+
+- **Types from pulled-in packages are found.** A package installed through the manifest (a
+  registry, a git URL, OpenUPM) has no sources under `Packages/` -- Unity unpacks it into
+  `Library/PackageCache`, and the index never looked there: "Assets and Packages" stopped at
+  `Packages/`, and "The whole project" skipped all of `Library`. Opening `UniTask` said "No type
+  named UniTask in the index" while Rider's own Structure view showed it fine. `Library/PackageCache`
+  is now walked under both of those scopes; the rest of `Library` stays ignored.
+- **Folders Unity itself skips are skipped.** A name ending in `~` (`Samples~`, `Documentation~`)
+  or starting with `.` is never compiled by Unity, and a package's samples redeclare the package's
+  types -- reading them would have put a second, dead copy of each into the index.
+- **A partial type is one type.** `UniTask` is declared in eleven files, and each was indexed as
+  a type of its own: ten of them with no fields at all, so which one a name landed on decided
+  whether the layout was right or empty, and the chooser offered eleven identical lines. The parts
+  are now read together -- every part's fields, attributes and base list -- so `[StructLayout]` on
+  a part with no fields still governs the fields of another, and a base class named on any part
+  counts. The chooser shows the type once. Each field remembers its own file, so navigating from a
+  row opens the part that declares it. Parts are ordered by file and then position; when more than
+  one part of a struct declares fields, a note says that C# leaves their order undefined (CS0282).
+  Checked against the real UniTask sources: 11 parts, one with fields, 16 B on x64.
+
+## 0.4.1 -- selection, and an icon
+
+- **Unfolding a selected struct now selects what appeared.** The selection was held by row, so
+  the members that came on screen were rows that had never been in it: the struct stayed
+  highlighted and its fields did not, and the table and the bricks stopped agreeing about what
+  was selected. Folding renumbered the rows below for the same reason. The selection is grown
+  again over whatever the tree shows after an expand or a collapse.
+- **A shift range grows over its subtrees like a single click does.** Growing ran only when
+  exactly one row was picked, so the ends of a shift range stopped at whatever row they landed
+  on while a single click swallowed a whole struct -- one gesture selecting a field and its
+  members, the other selecting half of them. One rule now covers a click, a shift range and a
+  ctrl pick. Ctrl-picked rows grow too, which they did not before.
+- **A shift-click extends from where the reader clicked.** Growing a selection moved the anchor
+  to the top of the subtree it grew into, and the next shift-click then ran from there instead
+  of from the clicked row, over rows nobody asked for. The anchor is put back.
+- **The plugin has an icon.** "ML" over three rows of memory cut into fields, padding in orange,
+  in the window's own colours; a dark variant for dark themes. It was the grey plug before.
+
 ## 0.4.0 -- generics
 
 - **A written `Box<int>` is laid out for real.** The declaration is found by name *and* arity --

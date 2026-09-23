@@ -31,6 +31,9 @@ all of this and shows none of it.
 - nested structs, expanded in place with absolute offsets
 - enums, down to their underlying type
 - `fixed` buffers, auto-properties and positional record parameters, which all take real space
+- `partial` types, read together from every file that declares a part
+- types with no source in the project -- `string`, `List<T>`, `Guid`, `Vector3`, a package's
+  DLL -- read from the metadata of the runtime's own assemblies (see below)
 - `const` and `static` members, which take none
 - references, `bool` and `char`: sized correctly, and reported as the reasons a struct is not
   blittable

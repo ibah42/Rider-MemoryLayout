@@ -248,9 +248,10 @@ object MemoryLayoutStyle {
 
     const val COLUMN_DECIMAL = "dec"
 
-    const val COLUMN_SIZE = "size"
+    /** Three characters at most: the column is sized for three digits and the title must fit. */
+    const val COLUMN_SIZE = "sz"
 
-    const val COLUMN_ALIGNMENT = "align"
+    const val COLUMN_ALIGNMENT = "al"
 
     const val COLUMN_TYPE = "type"
 
@@ -263,7 +264,7 @@ object MemoryLayoutStyle {
      * ceiling -- an offset column is as wide as the largest offset and not one character more.
      * The two text columns do need one: a fully qualified generic name would take the window.
      */
-    val COLUMN_CHARACTER_LIMITS = intArrayOf(0, 0, 0, 0, 28, 24)
+    val COLUMN_CHARACTER_LIMITS = intArrayOf(0, 0, 0, 0, 64, 24)
 
     /** The line between the numbers and the words, and the air on either side of it. */
     val columnSeparator = JBColor(Color(0x20, 0x20, 0x20), Color(0x00, 0x00, 0x00))

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40">
+    <!-- The letters are strokes, not <text>: a plugin icon is drawn by the IDE's own SVG loader,
+         which has no promise of any particular font on the machine showing the plugin list. -->
+    <g fill="none" stroke="#2B2F36" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M6 18 V5 L12 13 L18 5 V18"/>
+        <path d="M23 5 V18 H34"/>
+    </g>
+    <!-- Three rows of memory, read downwards, cut into fields of unequal size. The orange cells
+         are padding: finding it is what the plugin is for, so it is in the icon. -->
+    <g>
+        <rect x="3"  y="22"   width="12" height="4.5" rx="1" fill="#2E86F0"/>
+        <rect x="16" y="22"   width="7"  height="4.5" rx="1" fill="#E07A00"/>
+        <rect x="24" y="22"   width="13" height="4.5" rx="1" fill="#7B3FE4"/>
+
+        <rect x="3"  y="27.5" width="7"  height="4.5" rx="1" fill="#0E9A8D"/>
+        <rect x="11" y="27.5" width="16" height="4.5" rx="1" fill="#2E86F0"/>
+        <rect x="28" y="27.5" width="9"  height="4.5" rx="1" fill="#7B3FE4"/>
+
+        <rect x="3"  y="33"   width="18" height="4.5" rx="1" fill="#2E86F0"/>
+        <rect x="22" y="33"   width="5"  height="4.5" rx="1" fill="#E07A00"/>
+        <rect x="28" y="33"   width="9"  height="4.5" rx="1" fill="#0E9A8D"/>
+    </g>
+</svg>

@@ -18,13 +18,24 @@ class LayoutEngine(
     private val lookup: TypeLookup,
 ) {
 
-    fun layoutOf(type: DeclaredType): TypeLayout {
+    /**
+     * @param typeArguments what the declaration's type parameters are bound to -- `int` for a
+     *   `List<int>` variable -- or empty for the open declaration
+     */
+    fun layoutOf(type: DeclaredType, typeArguments: List<String> = emptyList()): TypeLayout {
         val declaration = type.declaration
+        val arguments = GenericName.bind(declaration.genericParameters, typeArguments)
         val result: StructResult
         if (declaration.isValueType) {
-            result = buildStruct(type, HashSet(), 0, emptyMap())
+            result = buildStruct(type, HashSet(), 0, arguments)
         } else {
-            result = buildObject(type, HashSet(), emptyMap())
+            result = buildObject(type, HashSet(), arguments)
+        }
+        val displayName: String
+        if (arguments.isEmpty()) {
+            displayName = declaration.displayName
+        } else {
+            displayName = declaration.name + "<" + typeArguments.joinToString(", ") + ">"
         }
         val confidence: LayoutConfidence
         if (result.isRuntimeDefined) {
@@ -35,7 +46,7 @@ class LayoutEngine(
             confidence = LayoutConfidence.EXACT
         }
         return TypeLayout(
-            displayName = declaration.displayName,
+            displayName = displayName,
             qualifiedName = declaration.qualifiedName,
             target = target,
             declaredLayoutKind = FieldReader.readLayoutAttribute(declaration).kind,
@@ -45,7 +56,7 @@ class LayoutEngine(
             nodes = result.nodes,
             confidence = confidence,
             blittableProblems = result.blittableProblems,
-            notes = result.notes,
+            notes = type.notes + result.notes + PartialTypes.notesFor(type),
         )
     }
 
@@ -118,7 +129,7 @@ class LayoutEngine(
                 containerNames = holder.declaration.containerNames + holder.declaration.name,
                 fileId = holder.fileId,
             )
-            for (declared in FieldReader.readFields(holder.maskedSource, holder.declaration)) {
+            for (declared in FieldReader.readFields(holder)) {
                 val field = substituted(declared, arguments)
                 objectFields.add(field)
                 val shape = placeField(field, context, visiting, 1)
@@ -267,7 +278,7 @@ class LayoutEngine(
     ): StructResult {
         val declaration = type.declaration
         val attribute = FieldReader.readLayoutAttribute(declaration)
-        val fields = FieldReader.readFields(type.maskedSource, declaration).map { declared ->
+        val fields = FieldReader.readFields(type).map { declared ->
             substituted(declared, arguments)
         }
         val context = LookupContext(
@@ -506,6 +517,13 @@ class LayoutEngine(
         } else {
             kind = NodeKind.UNRESOLVED
         }
+        // A field of a partial type knows its own file; the type's file is only right for one part.
+        val fieldFileId: String
+        if (field.fileId.isEmpty()) {
+            fieldFileId = fileId
+        } else {
+            fieldFileId = field.fileId
+        }
         return LayoutNode(
             kind = kind,
             offset = offset,
@@ -514,7 +532,7 @@ class LayoutEngine(
             typeName = typeNameOf(field),
             fieldName = field.name,
             declarationOffset = field.declarationOffset,
-            fileId = fileId,
+            fileId = fieldFileId,
             isAutoProperty = field.isAutoProperty,
             isReference = shape.isReference,
             children = shiftNodes(shape.children, offset),

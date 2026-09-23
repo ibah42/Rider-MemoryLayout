@@ -75,11 +75,14 @@ class MemoryLayoutSettings : PersistentStateComponent<MemoryLayoutSettings.Confi
          * A string rather than a map because this is written on every pixel of a column drag and
          * read back by a serializer whose map support is not worth depending on for six numbers.
          *
-         * The name carries a 2: the first version of this was written by the table's own layout
-         * as well as by the reader's drag, so every install has a set of widths nobody chose, and
-         * they would have gone on overriding the measured ones forever.
+         * This one is only the default for a project that has none of its own yet; see
+         * [MemoryLayoutProjectSettings].
+         *
+         * The name carries a 3. Version 2 was fed widths the table's own layout had stretched --
+         * every non-dragged layout spread the spare width over all six columns -- so what it holds
+         * is a set of bloated numbers nobody chose, and reading it back would bring them back.
          */
-        var columnWidths2: String = ""
+        var columnWidths3: String = ""
     }
 
     private var config = Config()
@@ -225,9 +228,9 @@ class MemoryLayoutSettings : PersistentStateComponent<MemoryLayoutSettings.Confi
 
     /** The widths as stored; parsing them is the table's business, not the settings'. */
     var columnWidths: String
-        get() = config.columnWidths2
+        get() = config.columnWidths3
         set(value) {
-            config.columnWidths2 = value
+            config.columnWidths3 = value
         }
 
     companion object {

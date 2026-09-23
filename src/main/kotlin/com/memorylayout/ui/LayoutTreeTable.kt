@@ -5,6 +5,7 @@ import com.memorylayout.layout.LayoutNode
 import com.memorylayout.layout.NodeKind
 import com.memorylayout.layout.TypeLayout
 import com.memorylayout.settings.MemoryLayoutSettings
+import com.intellij.openapi.project.Project
 import com.intellij.ui.ColoredTreeCellRenderer
 import com.intellij.ui.SimpleTextAttributes
 import com.intellij.ui.treeStructure.treetable.ListTreeTableModelOnColumns
@@ -16,6 +17,7 @@ import java.awt.Color
 import java.awt.Component
 import java.awt.Graphics
 import java.util.IdentityHashMap
+import java.util.TreeSet
 import javax.swing.BorderFactory
 import javax.swing.Icon
 import javax.swing.JTable
@@ -62,6 +64,18 @@ object LayoutTreeTable {
     /** Room for the sort arrow and the cell inset, on top of the text the column has to hold. */
     private const val COLUMN_SLACK = 4
 
+    /**
+     * Digits a numeric column holds before it has to grow: sizes and alignments are almost always
+     * under a thousand, and an offset column wider than its numbers is just air.
+     */
+    private const val MINIMUM_NUMBER_CHARACTERS = 3
+
+    /** The type column never starts narrower than this, however short this type's names are. */
+    private const val MINIMUM_TYPE_CHARACTERS = 20
+
+    /** The name column is what is left, but never less than this. */
+    private const val MINIMUM_NAME_CHARACTERS = 8
+
     private const val ROW_PADDING = 4
 
     /** Room the name column leaves for the level bar and the markers after the name. */
@@ -84,11 +98,17 @@ object LayoutTreeTable {
 
     private val bindings = java.util.WeakHashMap<TreeTable, WidthBinding>()
 
-    fun build(layout: TypeLayout, showPadding: Boolean, cacheLineSize: Int): TreeTable {
+    fun build(project: Project, layout: TypeLayout, showPadding: Boolean, cacheLineSize: Int): TreeTable {
         val root = DefaultMutableTreeNode()
         addNodes(root, layout.nodes, showPadding)
         val model = ListTreeTableModelOnColumns(root, columns())
-        val table = TreeTable(model)
+        val table = object : TreeTable(model) {
+            override fun doLayout() {
+                if (!layoutColumns(this)) {
+                    super.doLayout()
+                }
+            }
+        }
         table.setRootVisible(false)
         table.tree.isRootVisible = false
         table.tree.showsRootHandles = true
@@ -98,11 +118,42 @@ object LayoutTreeTable {
         // slack. With the default mode a drag steals from the neighbour and no width ever sticks.
         table.autoResizeMode = JTable.AUTO_RESIZE_LAST_COLUMN
         applyRenderers(table, cacheLineSize)
-        val binding = WidthBinding(table, widestTexts(layout, showPadding))
+        val binding = WidthBinding(project, table, widestTexts(layout, showPadding))
         bindings[table] = binding
         binding.applyStoredWidths()
         binding.attach()
         return table
+    }
+
+    /**
+     * Every column but the last at exactly its preferred width, the name column taking whatever is
+     * left. Returns false during a drag, which the table's own layout handles.
+     *
+     * `JTable` does not do this by itself, whatever its resize mode: `AUTO_RESIZE_LAST_COLUMN`
+     * only governs a drag, and every other layout -- a new tab, a resized window, a scrollbar
+     * appearing -- spreads the spare width over all the columns in proportion. That is what kept
+     * making the numeric columns wide again, and why a width dragged in one tab never showed in
+     * another: it was set as a preference and then spread away.
+     */
+    private fun layoutColumns(table: TreeTable): Boolean {
+        if (table.tableHeader?.resizingColumn != null) {
+            return false
+        }
+        val columnModel = table.columnModel
+        val columnCount = columnModel.columnCount
+        if (columnCount == 0) {
+            return true
+        }
+        var used = 0
+        for (index in 0 until columnCount - 1) {
+            val column = columnModel.getColumn(index)
+            column.width = column.preferredWidth
+            used += column.preferredWidth
+        }
+        val last = columnModel.getColumn(columnCount - 1)
+        val minimum = table.getFontMetrics(table.font).charWidth('0') * MINIMUM_NAME_CHARACTERS
+        last.width = maxOf(table.width - used, minimum)
+        return true
     }
 
     /** Lays the columns out at the widths the reader last dragged them to, in every open tab. */
@@ -284,29 +335,59 @@ object LayoutTreeTable {
     }
 
     /**
-     * Extends a selection over the whole subtree of the row.
+     * The rows the selection should cover, given the rows the reader picked.
      *
      * Selecting a struct means selecting its members -- they are what it is made of, and the
-     * bricks light up that way, so the table has to agree. An unfolded subtree is a run of
-     * consecutive rows, so this is a plain interval and the table paints it itself.
+     * bricks light up that way, so the table has to agree. So every picked row grows over its own
+     * unfolded subtree, and it does so whether the reader picked one row, a shift range or a
+     * handful of separate ones. One rule for all three is the only way the result stays
+     * predictable: a range that grew at one end and not at the other is what reads as crooked.
+     *
+     * Growing is all this does. A row nobody picked, and nobody's subtree reaches, stays out.
      */
-    fun selectSubtree(table: TreeTable, row: Int) {
-        if (row < 0) {
-            return
-        }
-        val path = table.tree.getPathForRow(row) ?: return
-        var last = row
-        var next = row + 1
-        while (next < table.tree.rowCount) {
-            val candidate = table.tree.getPathForRow(next) ?: break
-            if (!path.isDescendant(candidate)) {
-                break
+    fun subtreeSelection(table: TreeTable, rows: IntArray): IntArray {
+        val covered = TreeSet<Int>()
+        for (row in rows) {
+            if (row < 0) {
+                continue
             }
-            last = next
-            next++
+            covered.add(row)
+            val path = table.tree.getPathForRow(row) ?: continue
+            var next = row + 1
+            while (next < table.tree.rowCount) {
+                val candidate = table.tree.getPathForRow(next)
+                if (candidate == null || !path.isDescendant(candidate)) {
+                    break
+                }
+                covered.add(next)
+                next++
+            }
         }
-        if (last > row) {
-            table.setRowSelectionInterval(row, last)
+        return covered.toIntArray()
+    }
+
+    /**
+     * Holds these rows selected, as the runs of consecutive rows they are made of.
+     *
+     * The anchor goes back where the reader left it. It is the end a shift-click extends from, so
+     * leaving it at the top of whatever subtree the previous click grew into is what sent the
+     * next shift-click over rows nobody asked for.
+     */
+    fun applySelection(table: TreeTable, rows: IntArray) {
+        val selection = table.selectionModel
+        val anchor = selection.anchorSelectionIndex
+        selection.clearSelection()
+        var start = 0
+        while (start < rows.size) {
+            var end = start
+            while (end + 1 < rows.size && rows[end + 1] == rows[end] + 1) {
+                end++
+            }
+            selection.addSelectionInterval(rows[start], rows[end])
+            start = end + 1
+        }
+        if (anchor >= 0) {
+            selection.anchorSelectionIndex = anchor
         }
     }
 
@@ -391,6 +472,7 @@ object LayoutTreeTable {
      * makes it obvious the setting is shared.
      */
     private class WidthBinding(
+        private val project: Project,
         private val table: TreeTable,
         private val widest: Array<String>,
     ) : TableColumnModelListener {
@@ -403,17 +485,24 @@ object LayoutTreeTable {
 
         fun applyStoredWidths() {
             applying = true
-            for (index in 0 until minOf(table.columnModel.columnCount, COLUMN_IDS.size)) {
+            // The name column is not set: it takes what the others leave, see layoutColumns.
+            for (index in 0 until minOf(table.columnModel.columnCount, COLUMN_IDS.size) - 1) {
                 val column = table.columnModel.getColumn(index)
                 val needed = neededWidth(index)
-                val stored = MemoryLayoutViewState.columnWidthOf(COLUMN_IDS[index])
-                if (stored != MemoryLayoutViewState.NO_STORED_WIDTH) {
-                    // A dragged width is a wish, not a cage: the content still has to fit, or the
-                    // reader is looking at a clipped number and does not know it.
-                    column.preferredWidth = maxOf(stored, needed)
+                val stored = MemoryLayoutViewState.columnWidthOf(project, COLUMN_IDS[index])
+                if (stored == MemoryLayoutViewState.NO_STORED_WIDTH) {
+                    column.preferredWidth = needed
                     continue
                 }
-                column.preferredWidth = needed
+                if (index == COLUMN_INDEX_TYPE) {
+                    // A type name that does not fit is cut with an ellipsis the reader can see;
+                    // the dragged width stands.
+                    column.preferredWidth = stored
+                    continue
+                }
+                // A clipped number looks like a different number, so a numeric column grows past
+                // a dragged width when this type's numbers need it -- and only then.
+                column.preferredWidth = maxOf(stored, needed)
             }
             // A preferred width is only a wish until the table lays itself out again -- but a
             // table that has not been shown yet has no width to distribute, and laying it out now
@@ -435,7 +524,13 @@ object LayoutTreeTable {
             val metrics = table.getFontMetrics(table.font)
             val header = metrics.stringWidth(COLUMN_TITLES[index])
             val content = metrics.stringWidth(widest[index])
-            var width = maxOf(header, content) + JBUI.scale(COLUMN_SLACK)
+            val floor: Int
+            if (index == COLUMN_INDEX_TYPE) {
+                floor = metrics.charWidth('0') * MINIMUM_TYPE_CHARACTERS
+            } else {
+                floor = metrics.charWidth('0') * MINIMUM_NUMBER_CHARACTERS
+            }
+            var width = maxOf(header, content, floor) + JBUI.scale(COLUMN_SLACK)
             if (index == COLUMN_INDEX_ALIGNMENT || index == COLUMN_INDEX_TYPE) {
                 // Room for the rule between the numbers and the words, and the air around it.
                 width += metrics.charWidth('0') * MemoryLayoutStyle.SEPARATOR_CHARACTERS
@@ -454,10 +549,18 @@ object LayoutTreeTable {
                 return
             }
             val widths = LinkedHashMap<String, Int>()
-            for (index in 0 until minOf(table.columnModel.columnCount, COLUMN_IDS.size)) {
-                widths[COLUMN_IDS[index]] = table.columnModel.getColumn(index).width
+            // A drag sets a column's width but not its preference, and the next layout -- ours,
+            // which lays columns out by preference -- would put the column straight back. So the
+            // preference follows the drag. The name column is left out: its width is the
+            // window's, not a choice.
+            applying = true
+            for (index in 0 until minOf(table.columnModel.columnCount, COLUMN_IDS.size) - 1) {
+                val column = table.columnModel.getColumn(index)
+                column.preferredWidth = column.width
+                widths[COLUMN_IDS[index]] = column.width
             }
-            MemoryLayoutViewState.rememberColumnWidths(widths, table)
+            applying = false
+            MemoryLayoutViewState.rememberColumnWidths(project, widths, table)
         }
 
         override fun columnAdded(event: TableColumnModelEvent) {

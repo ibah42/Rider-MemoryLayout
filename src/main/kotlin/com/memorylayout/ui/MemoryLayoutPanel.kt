@@ -3,6 +3,8 @@ package com.memorylayout.ui
 import com.memorylayout.index.IndexedType
 import com.memorylayout.layout.BrickLayout
 import com.memorylayout.layout.CacheLineMath
+import com.memorylayout.layout.CodeMask
+import com.memorylayout.layout.SourceText
 import com.memorylayout.layout.LayoutNode
 import com.memorylayout.layout.LayoutTarget
 import com.memorylayout.layout.TypeLayout
@@ -15,6 +17,7 @@ import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
@@ -38,6 +41,7 @@ import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JSlider
 import javax.swing.JSplitPane
+import javax.swing.SwingUtilities
 import javax.swing.event.TreeExpansionEvent
 import javax.swing.event.TreeExpansionListener
 import javax.swing.tree.TreePath
@@ -92,6 +96,9 @@ class MemoryLayoutPanel(
 
     val typeQualifiedName: String
         get() = entry.qualifiedName
+
+    val tabKey: String
+        get() = entry.tabKey
 
     init {
         headerLabel.border = JBUI.Borders.empty(HEADER_PADDING)
@@ -362,23 +369,33 @@ class MemoryLayoutPanel(
         headerLabel.text = MemoryLayoutStyle.headerText(computed, cacheLineSize)
         headerLabel.toolTipText = computed.notes.joinToString("\n").ifEmpty { null }
         val settings = MemoryLayoutSettings.getInstance()
-        val built = LayoutTreeTable.build(computed, settings.showPaddingRows, cacheLineSize)
+        val built = LayoutTreeTable.build(project, computed, settings.showPaddingRows, cacheLineSize)
         themeBackground = built.background
         built.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(event: MouseEvent) {
-                if (event.clickCount < DOUBLE_CLICK) {
+                // Ctrl and Shift build a selection; only a plain click is a request to look.
+                if (!SwingUtilities.isLeftMouseButton(event) || event.isControlDown || event.isShiftDown || event.isMetaDown) {
                     return
                 }
-                navigateTo(LayoutTreeTable.nodeAt(built, built.rowAtPoint(event.point)))
+                val node = LayoutTreeTable.nodeAt(built, built.rowAtPoint(event.point))
+                // One click shows the declaration and leaves the focus here, so the next row can
+                // be clicked straight away; a double click goes there to edit.
+                navigateTo(node, event.clickCount >= DOUBLE_CLICK)
             }
         })
+        // A selection is held by row, and unfolding a selected struct puts rows on screen that
+        // were never in it -- the struct stayed selected, its members appeared unselected, and
+        // the two views stopped agreeing. Folding renumbers the rows under it for the same
+        // reason. So the selection is grown again over whatever the tree now shows.
         built.tree.addTreeExpansionListener(object : TreeExpansionListener {
             override fun treeExpanded(event: TreeExpansionEvent) {
                 rebuildBricks()
+                selectionChanged(built)
             }
 
             override fun treeCollapsed(event: TreeExpansionEvent) {
                 rebuildBricks()
+                selectionChanged(built)
             }
         })
         built.selectionModel.addListSelectionListener { event ->
@@ -419,18 +436,16 @@ class MemoryLayoutPanel(
     }
 
     /**
-     * The table's selection moved: widen it over the subtree and tell the bricks.
+     * The table's selection moved: grow it over the subtrees and tell the bricks.
      *
-     * Widening puts the selection back into the model it came from, so the guard is what stops
+     * Growing puts the selection back into the model it came from, so the guard is what stops
      * that from being read as a second selection and going round again.
      */
     private fun selectionChanged(current: TreeTable) {
-        val rows = current.selectedRows
-        // One row means "this field and what it is made of"; several mean exactly those, because
-        // the reader picked them one at a time the way they would pick files.
-        if (rows.size == 1) {
+        val wanted = LayoutTreeTable.subtreeSelection(current, current.selectedRows)
+        if (!wanted.contentEquals(current.selectedRows)) {
             changingSelection = true
-            LayoutTreeTable.selectSubtree(current, rows[0])
+            LayoutTreeTable.applySelection(current, wanted)
             changingSelection = false
         }
         brickView.select(LayoutTreeTable.nodesAt(current, current.selectedRows))
@@ -452,12 +467,23 @@ class MemoryLayoutPanel(
         brickScroll.repaint()
     }
 
-    private fun navigateTo(node: LayoutNode?) {
+    /**
+     * Opens the file a row's field is declared in, with the caret on the field's name. A field read
+     * from an assembly has no file -- its id starts with `metadata:` -- and a click on it does
+     * nothing rather than guess.
+     */
+    private fun navigateTo(node: LayoutNode?, requestFocus: Boolean) {
         if (node == null || node.declarationOffset < 0 || node.fileId.isEmpty()) {
             return
         }
         val file = VirtualFileManager.getInstance().findFileByUrl(node.fileId) ?: return
-        OpenFileDescriptor(project, file, node.declarationOffset).navigate(true)
+        var offset = node.declarationOffset
+        val document = FileDocumentManager.getInstance().getDocument(file)
+        if (document != null && offset < document.textLength) {
+            val masked = CodeMask.of(document.immutableCharSequence.toString())
+            offset = SourceText.nameOffsetInStatement(masked, offset, node.fieldName)
+        }
+        OpenFileDescriptor(project, file, offset).navigate(requestFocus)
     }
 
     private fun copyToClipboard() {

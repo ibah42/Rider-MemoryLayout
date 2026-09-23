@@ -2,6 +2,12 @@ package com.memorylayout.actions
 
 import com.memorylayout.index.IndexedType
 import com.memorylayout.index.ProjectTypeLookup
+import com.memorylayout.index.RuntimeAssemblyService
+import com.memorylayout.layout.CodeMask
+import com.memorylayout.layout.GenericName
+import com.memorylayout.layout.VariableType
+import com.memorylayout.layout.VariableTypes
+import com.memorylayout.metadata.CompositeTypeLookup
 import com.memorylayout.index.TypeIndexService
 import com.memorylayout.layout.LookupContext
 import com.memorylayout.layout.SourceText
@@ -40,22 +46,70 @@ class ShowMemoryLayoutAction : AnAction() {
         val project = event.project ?: return
         val editor = event.getData(CommonDataKeys.EDITOR) ?: return
         val file = event.getData(CommonDataKeys.VIRTUAL_FILE)
-        val typeName = identifierUnderCaret(event) ?: return
+        val identifier = identifierUnderCaret(event) ?: return
         val caretOffset = editor.caretModel.offset
+        // Read on the UI thread, where the document may be read; everything else runs behind.
+        val source = editor.document.immutableCharSequence.toString()
         val index = TypeIndexService.getInstance(project)
         index.buildIfNeeded {
-            val context = contextAt(index, file, caretOffset)
-            val candidates = ProjectTypeLookup(index).rankedCandidates(typeName, context)
+            val runtime = RuntimeAssemblyService.getInstance(project)
+            val lookup = CompositeTypeLookup(listOf(ProjectTypeLookup(index), runtime.lookup()))
+            val variable = VariableTypes.at(CodeMask.of(source), source, caretOffset, file?.url ?: "", lookup)
+            val candidates: List<IndexedType>
+            val emptyMessage: String
+            when (variable) {
+                is VariableType.Declared -> {
+                    candidates = candidatesFor(project, index, variable.typeName, variable.context)
+                    emptyMessage = "${variable.variableName} is a ${variable.typeName}, which is not in the " +
+                        "sources or the referenced assemblies"
+                }
+                is VariableType.Unknown -> {
+                    candidates = emptyList()
+                    emptyMessage = variable.reason
+                }
+                null -> {
+                    candidates = candidatesFor(project, index, identifier, contextAt(index, file, caretOffset))
+                    emptyMessage = "No type named $identifier in the sources or the referenced assemblies"
+                }
+            }
             ApplicationManager.getApplication().invokeLater {
-                present(project, editor, typeName, candidates)
+                present(project, editor, emptyMessage, candidates)
             }
         }
     }
 
-    private fun present(project: Project, editor: Editor, typeName: String, candidates: List<IndexedType>) {
+    /**
+     * The sources first, then the assemblies: `string`, `List`, `Guid`, a type from a package DLL.
+     * A variable's written arguments -- the `int` of `List<int>` -- travel with each candidate that
+     * can take them, so the window lays out that instantiation rather than the open declaration.
+     */
+    private fun candidatesFor(
+        project: Project,
+        index: TypeIndexService,
+        typeName: String,
+        context: LookupContext,
+    ): List<IndexedType> {
+        var candidates = ProjectTypeLookup(index).rankedCandidates(typeName, context)
+        if (candidates.isEmpty()) {
+            candidates = RuntimeAssemblyService.getInstance(project).candidates(typeName, context)
+        }
+        val arguments = GenericName.argumentsOf(typeName)
+        if (arguments.isEmpty()) {
+            return candidates
+        }
+        return candidates.map { candidate ->
+            if (candidate.arity == arguments.size) {
+                candidate.copy(typeArguments = arguments)
+            } else {
+                candidate
+            }
+        }
+    }
+
+    private fun present(project: Project, editor: Editor, emptyMessage: String, candidates: List<IndexedType>) {
         if (candidates.isEmpty()) {
             JBPopupFactory.getInstance()
-                .createMessage("No type named $typeName in the index")
+                .createMessage(emptyMessage)
                 .showInBestPositionFor(editor)
             return
         }
