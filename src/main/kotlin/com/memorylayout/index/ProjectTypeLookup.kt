@@ -23,12 +23,26 @@ class ProjectTypeLookup(private val index: TypeIndexService) : TypeLookup {
      *
      * A partial type is offered once, however many files declare it: eleven `UniTask` lines in the
      * chooser would be eleven ways of asking for the same layout.
+     *
+     * @param allowOpenGeneric a bare name that matches nothing exactly may mean a generic
+     *   declaration of that name -- the caret on `MessageLogState` in `MessageLogState<TPayload>`.
+     *   For opening a type by name only; resolving a field keeps arity strict.
      */
-    fun rankedCandidates(typeName: String, context: LookupContext): List<IndexedType> {
-        val ranked = index.candidates(typeName)
-            .filter { entry ->
-                TypeMatching.matches(entry.simpleName, entry.qualifiedName, entry.arity, typeName)
+    fun rankedCandidates(
+        typeName: String,
+        context: LookupContext,
+        allowOpenGeneric: Boolean = false,
+    ): List<IndexedType> {
+        val named = index.candidates(typeName)
+        var matching = named.filter { entry ->
+            TypeMatching.matches(entry.simpleName, entry.qualifiedName, entry.arity, typeName)
+        }
+        if (matching.isEmpty() && allowOpenGeneric) {
+            matching = named.filter { entry ->
+                TypeMatching.matchesOpenDeclaration(entry.simpleName, entry.qualifiedName, entry.arity, typeName)
             }
+        }
+        val ranked = matching
             .sortedByDescending { entry ->
                 TypeMatching.score(entry.namespaceName, entry.containerNames, context, entry.fileUrl)
             }

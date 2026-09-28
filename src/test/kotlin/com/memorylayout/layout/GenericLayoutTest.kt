@@ -192,8 +192,8 @@ class GenericLayoutTest {
         assertEquals(8, items.alignment)
         assertTrue(items.isReference)
         assertEquals(NodeKind.FIELD, items.kind)
-        assertEquals(16, field(layout, "tag").offset)
-        assertEquals(24, layout.size)
+        assertEquals(24, field(layout, "tag").offset)
+        assertEquals(32, layout.size)
         assertTrue(layout.notes.any { note -> note.contains("not declared in the project") })
     }
 

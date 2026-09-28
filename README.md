@@ -32,6 +32,8 @@ all of this and shows none of it.
 - enums, down to their underlying type
 - `fixed` buffers, auto-properties and positional record parameters, which all take real space
 - `partial` types, read together from every file that declares a part
+- the closure a lambda captures into, with the caret on its `=>` -- read from the project's
+  compiled assemblies in `Library/ScriptAssemblies`
 - types with no source in the project -- `string`, `List<T>`, `Guid`, `Vector3`, a package's
   DLL -- read from the metadata of the runtime's own assemblies (see below)
 - `const` and `static` members, which take none

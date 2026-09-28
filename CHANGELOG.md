@@ -1,5 +1,96 @@
 # Changelog
 
+## 1.2.0
+
+- **The type's total is the table's first row.** Size and alignment sit in their own columns, the
+  type name in the type column, and the name column says where the type is declared
+  (`WorldChunk.cs:14`). A click on the row goes to the declaration; a partial type offers its
+  files to choose from; a closure goes to its lambda; a type read from an assembly names the
+  assembly. The header line above the table stays, with the padding and the cache lines.
+- **A brace inside an attribute no longer ends the namespace.** `SourceText.statementsIn` skipped
+  a `{` inside `(...)`/`[...]` but not its `}`, so
+  `[GenerateTestsForBurstCompatibility(GenericTypeArguments = new [] { typeof(int) })]` dropped
+  every type after it from the index -- `NativeList<T>`, `NativeHashMap`, `UnsafeList` and nine
+  more in Unity.Collections -- and a field of one was guessed to be a class reference.
+- **Column widths are locked, not suggested.** Widths used to be set as preferred widths, which
+  `JTable`'s own layout passes overrule -- the one it runs while a header reports a resizing
+  column copies the current widths back into the preferred ones -- so the numeric columns sat at
+  Swing's default 75 px and the next drag stored those 75s. Every column but `name` is now held
+  at min = max = its width; a drag unlocks just the dragged column and locks it again on release,
+  when the width is stored and applied to every tab. The numeric columns start at their text
+  (4 to 8 characters) plus half as much again, the offset column plus 0.7, the type column at the longest type name and at least 32. Titles are `size` and
+  `align`. Stored widths are reset once.
+- **Classes are laid out the way Unity lays them out, not the way CoreCLR does.** Mono and
+  IL2CPP start an object with two pointers -- the vtable at 0, the monitor (lock, hash) at 8 --
+  and put the fields after them, from 0x10 on x64; there is no sync block before the reference
+  and no 24-byte floor. Each class's own fields go references first, then the rest, each group in
+  declaration order (Mono's `mono_class_layout_fields`), unless the class is `Sequential` or
+  `Explicit`; the base class still comes first. `List<T>` is now `_items`, `_syncRoot`, `_size`,
+  `_version`, as in memory.
+- **A `string` ends where its characters start.** `_stringLength` at 0x10, `_firstChar` at 0x14,
+  22 B for the empty string, and no tail padding -- the two bytes shown as padding were the
+  characters.
+- **Strings and arrays show their repeating end.** Both are one allocation: the header, then the
+  elements inline to the end of the object. The table ends in one row for all of them --
+  `int × n` from 0x20 for an array, `char × (n + 1)` from 0x14 for a string -- whose size is a
+  formula (`4·n`) and whose stride is shown; a struct element unfolds into element `[0]`. The
+  header gives the size as `32 + 4·n B` and says how many elements share the first cache line.
+  An array (`T[]`) opens as a layout of its own: vtable, monitor, `bounds*`, `max_length`, then
+  the elements.
+- **The bricks draw the repetition:** element `[0]`, fainter copies `[1]` and `[2]`, then
+  `… × n`. Every copy selects and lights up with its row; an unfolded element is drawn as its
+  members in every copy.
+- **`n =` in the toolbar**, per tab, for a string or an array: with a count the formulas become
+  numbers, the allocation is rounded up to 8 with the rounding shown as padding, and the bricks
+  draw the elements one by one (a count past 256 ends in `… × rest`).
+- **A click on the type of a reference opens what it points at** -- `List<Enemy>._items` opens
+  `Enemy[]`, an element of class type opens the class -- in a tab of its own. The type of a
+  reference ends in `→` and the cursor turns into a hand over it. The caret on a variable of
+  array type opens the array too.
+- **A generic type opens from its bare name.** The caret on `MessageLogState` in
+  `public struct MessageLogState<TPayload>` found nothing: the name under the caret has no
+  arguments, and the project index required the arity to match. Opening a type by name now falls
+  back to a generic declaration of that name when nothing matches exactly, as the assembly lookup
+  already did; resolving a field stays strict.
+- **A nullable reference is a reference.** `Exception?` and `string?` were laid out as
+  `Nullable<T>` -- a flag, seven bytes of padding and the value, 16 B -- when the `?` on a class is
+  only an annotation and the field is the same 8 B pointer. They are now one `ref →` row that
+  opens the class; `int?` and other value types are still `Nullable<T>`.
+- A click on a row read the document outside a read action, and the IDE logged a threading error
+  each time.
+- No second, empty "Memory Layout" tab next to the first type opened.
+- The brick slider is labelled `bricks scale`.
+
+## 1.1.0 -- what a lambda captures
+
+- **The caret on a lambda's `=>`, or on an anonymous method's `delegate`, opens its closure.** The
+  C# compiler moves every local a lambda captures into a hidden class nested in the lambda's type,
+  `<>c__DisplayClass5_0`, one per scope and shared by every lambda of that scope, allocated when
+  the scope is entered. That class is read from the project's own compiled assemblies in
+  `Library/ScriptAssemblies` and laid out like any other: a row per captured variable under the
+  name written in the source, `this` when the lambda needs the instance, `outer closure` when it
+  reaches a variable of an enclosing scope. A click on a row goes to the variable's declaration.
+- **The source says what to look for, the assembly says what is there.** `layout/Lambdas.kt` reads
+  the lambda: its body, the names in it that resolve to locals or parameters declared outside it
+  (constants, local functions, member calls and named arguments excluded), whether it touches
+  the instance, and the member it sits in under the compiler's own name (`Update`, `.ctor` for a
+  constructor or a field initializer, `.cctor`, `get_X`). `metadata/Closures.kt` finds the class:
+  a lambda method named after that member (`<Update>b__0`), the captured names among its fields
+  or reachable through `CS$<>8__locals`, the fewest other fields.
+- **When there is no closure, the window says why:** a lambda capturing nothing is cached once in
+  the compiler's `<>c` singleton; one capturing only `this` becomes a method of the type and
+  allocates just its delegate. The delegate's own cost is given too, laid out from the runtime's
+  `MulticastDelegate` (128 B on x64 in Unity's Mono).
+- **Stale assemblies are named.** The notes say which assembly the class was read from, and say so
+  when it is older than the file on screen -- Unity has not recompiled yet.
+- `=>` is not always a lambda: an expression-bodied member (`int Count => ...`,
+  `void Reset() => ...`) and a `switch` expression arm (`1 =>`, `_ =>`, `Kind.Coins =>`,
+  `Enemy e =>`) are told apart and ignored.
+- Checked on a real Unity project (`game-core-template-sandbox`, 142 compiled assemblies,
+  1145 closure classes): of 809 lambdas in `Assets`, 260 capture locals; all 227 in compiled code
+  find their closure class, each one holding a lambda method of the right member. The other 33
+  sit under `#if` symbols that are off, so the compiler never saw them.
+
 ## 1.0.4 -- properties and events that take room
 
 Found by a new suite, `PropertyStorageTest`, that goes through every shape of property and event

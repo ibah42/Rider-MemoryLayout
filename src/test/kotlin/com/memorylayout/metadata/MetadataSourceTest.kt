@@ -114,10 +114,12 @@ class MetadataSourceTest {
             genericParameters = listOf("T"),
         )
         val layout = layoutOf(MetadataTypeLookup(listOf(list)), "List<T>")
-        assertEquals(8, node(layout, "_items").offset)
-        assertEquals(16, node(layout, "_size").offset)
+        // Mono's order: the two references, then the two ints.
+        assertEquals(16, node(layout, "_items").offset)
         assertEquals(24, node(layout, "_syncRoot").offset)
-        assertEquals(32, layout.size)
+        assertEquals(32, node(layout, "_size").offset)
+        assertEquals(36, node(layout, "_version").offset)
+        assertEquals(40, layout.size)
     }
 
     @Test
@@ -166,9 +168,29 @@ class MetadataSourceTest {
     fun readsAKeywordAsItsFrameworkType() {
         val string = type("String", MetadataTypeKind.CLASS, listOf(field("int", "_stringLength"), field("char", "_firstChar")))
         val layout = layoutOf(MetadataTypeLookup(listOf(string)), "string")
-        assertEquals(8, node(layout, "_stringLength").offset)
-        assertEquals(12, node(layout, "_firstChar").offset)
+        assertEquals(16, node(layout, "_stringLength").offset)
+        // _firstChar is the first of the characters: one repeating row from 20, two bytes apart,
+        // with the terminating zero counted in. The empty string is 22 bytes, no tail padding.
+        val chars = node(layout, "chars")
+        assertEquals(NodeKind.REPEAT, chars.kind)
+        assertEquals(20, chars.offset)
+        assertEquals(2, chars.repeatStride)
+        assertEquals("n + 1", chars.repeatCountText)
+        assertEquals(22, layout.size)
+        assertEquals(0, layout.paddingBytes)
         assertTrue(layout.notes.any { note -> note.contains("2·n") })
+    }
+
+    @Test
+    fun aCountedStringIsTheWholeAllocation() {
+        val string = type("String", MetadataTypeKind.CLASS, listOf(field("int", "_stringLength"), field("char", "_firstChar")))
+        val lookup = MetadataTypeLookup(listOf(string))
+        val declared = lookup.resolve("string", LookupContext.EMPTY) ?: throw AssertionError("no string")
+        val layout = LayoutEngine(LayoutTarget.X64, lookup).layoutOf(declared, emptyList(), 4)
+        // 20 + 2 * (4 + 1) = 30 bytes of string, 32 once the collector rounds it.
+        assertEquals(32, layout.size)
+        assertEquals(2, layout.paddingBytes)
+        assertEquals("5", node(layout, "chars").repeatCountText)
     }
 
     @Test

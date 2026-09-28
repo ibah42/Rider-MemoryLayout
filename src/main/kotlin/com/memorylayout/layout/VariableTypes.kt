@@ -84,6 +84,14 @@ object VariableTypes {
         return Resolver(masked, source, fileId, lookup).variableAt(range.first, range.second, 0)
     }
 
+    /**
+     * Where the local variable or parameter [name], used at [useOffset], is declared -- the offset
+     * of the name in its declaration -- or -1 when it is not a local: a field, a type, unknown.
+     */
+    fun localDeclarationOffset(masked: String, source: String, name: String, useOffset: Int, fileId: String, lookup: TypeLookup): Int {
+        return Resolver(masked, source, fileId, lookup).localDeclarationOffset(name, useOffset)
+    }
+
     /** Start and end of the identifier the offset sits in or right after. */
     fun identifierRangeAt(text: String, offset: Int): Pair<Int, Int>? {
         if (offset < 0 || offset > text.length) {
@@ -118,6 +126,7 @@ object VariableTypes {
         val context: LookupContext,
         val initializerStart: Int = NONE,
         val foreachSourceStart: Int = NONE,
+        val nameOffset: Int = NONE,
     )
 
     /** One step of `a.b().c`: a name, and for a call the type arguments it was written with. */
@@ -185,6 +194,10 @@ object VariableTypes {
             return null
         }
 
+        fun localDeclarationOffset(name: String, useStart: Int): Int {
+            return localDeclarationOf(name, useStart)?.nameOffset ?: NONE
+        }
+
         /** Backwards from the use, the nearest declaration of the name whose scope reaches it. */
         private fun localDeclarationOf(name: String, useStart: Int): Found? {
             var position = useStart
@@ -204,13 +217,13 @@ object VariableTypes {
                 val context = contextAt(useStart)
                 return when (follower) {
                     Follower.INITIALIZER -> {
-                        Found(typeText, context, initializerStart = initializerStartAfter(candidateEnd))
+                        Found(typeText, context, initializerStart = initializerStartAfter(candidateEnd), nameOffset = candidate)
                     }
                     Follower.FOREACH -> {
-                        Found(typeText, context, foreachSourceStart = foreachSourceAfter(candidateEnd))
+                        Found(typeText, context, foreachSourceStart = foreachSourceAfter(candidateEnd), nameOffset = candidate)
                     }
                     else -> {
-                        Found(typeText, context)
+                        Found(typeText, context, nameOffset = candidate)
                     }
                 }
             }

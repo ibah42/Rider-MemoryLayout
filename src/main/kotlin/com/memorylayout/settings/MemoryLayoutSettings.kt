@@ -78,11 +78,12 @@ class MemoryLayoutSettings : PersistentStateComponent<MemoryLayoutSettings.Confi
          * This one is only the default for a project that has none of its own yet; see
          * [MemoryLayoutProjectSettings].
          *
-         * The name carries a 3. Version 2 was fed widths the table's own layout had stretched --
-         * every non-dragged layout spread the spare width over all six columns -- so what it holds
-         * is a set of bloated numbers nobody chose, and reading it back would bring them back.
+         * The name carries a 5. Versions 2 to 4 were written while the table's own layout could
+         * still overrule a width, so what they hold is mostly Swing's default of 75 per column --
+         * widths nobody chose, which the columns would now be locked to. Version 5 held drags made
+         * against defaults that were too narrow.
          */
-        var columnWidths3: String = ""
+        var columnWidths6: String = ""
     }
 
     private var config = Config()
@@ -228,9 +229,9 @@ class MemoryLayoutSettings : PersistentStateComponent<MemoryLayoutSettings.Confi
 
     /** The widths as stored; parsing them is the table's business, not the settings'. */
     var columnWidths: String
-        get() = config.columnWidths3
+        get() = config.columnWidths6
         set(value) {
-            config.columnWidths3 = value
+            config.columnWidths6 = value
         }
 
     companion object {

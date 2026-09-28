@@ -15,6 +15,41 @@ class TypeScannerTest {
     }
 
     @Test
+    fun aBraceInsideAnAttributeDoesNotEndTheNamespace() {
+        // Unity.Collections' NativeList<T> is declared exactly like this; the `}` of the array
+        // initializer used to end the namespace block and drop every type after it.
+        val declarations = scan(
+            """
+            namespace Unity.Collections
+            {
+                public interface IIndexable<T> where T : unmanaged
+                {
+                    int Length { get; set; }
+                }
+
+                [GenerateTestsForBurstCompatibility(GenericTypeArguments = new [] { typeof(int) })]
+                public unsafe struct NativeList<T>
+                    : INativeDisposable
+                    , INativeList<T>
+                    where T : unmanaged
+                {
+                    internal UnsafeList<T>* m_ListData;
+                }
+
+                public struct After
+                {
+                    public int value;
+                }
+            }
+            """
+        )
+        assertEquals(
+            listOf("IIndexable", "NativeList", "After"),
+            declarations.map { declaration -> declaration.name },
+        )
+    }
+
+    @Test
     fun aParameterNamedRecordIsNotADeclaration() {
         val declarations = scan(
             """

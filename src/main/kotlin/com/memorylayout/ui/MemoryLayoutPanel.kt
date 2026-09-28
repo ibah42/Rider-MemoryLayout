@@ -1,12 +1,15 @@
 package com.memorylayout.ui
 
 import com.memorylayout.index.IndexedType
+import com.memorylayout.index.TypeCandidates
 import com.memorylayout.layout.BrickLayout
 import com.memorylayout.layout.CacheLineMath
 import com.memorylayout.layout.CodeMask
 import com.memorylayout.layout.SourceText
 import com.memorylayout.layout.LayoutNode
 import com.memorylayout.layout.LayoutTarget
+import com.memorylayout.layout.LookupContext
+import com.memorylayout.layout.RepeatTail
 import com.memorylayout.layout.TypeLayout
 import com.memorylayout.settings.MemoryLayoutSettings
 import com.intellij.icons.AllIcons
@@ -17,26 +20,36 @@ import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.openapi.ui.SimpleToolWindowPanel
 import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.ui.components.JBLabel
+import com.intellij.ui.awt.RelativePoint
 import com.intellij.ui.components.JBScrollPane
+import com.intellij.ui.components.JBTextField
 import com.intellij.ui.treeStructure.treetable.TreeTable
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
 import java.awt.Color
+import java.awt.Component
+import java.awt.Cursor
 import java.awt.FlowLayout
 import java.awt.Font
 import java.awt.Insets
 import java.awt.datatransfer.StringSelection
+import java.awt.event.FocusAdapter
+import java.awt.event.FocusEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.util.IdentityHashMap
+import javax.swing.DefaultListCellRenderer
 import javax.swing.JButton
+import javax.swing.JList
 import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JSlider
@@ -82,9 +95,17 @@ class MemoryLayoutPanel(
 
     private val byteWidthControl = ByteWidthControl()
 
+    private val countControl = CountControl()
+
+    /** This tab's `n` for a string or an array; [RepeatTail.UNKNOWN_COUNT] keeps the formulas. */
+    private var elementCount = RepeatTail.UNKNOWN_COUNT
+
     private var table: TreeTable? = null
 
     private var layout: TypeLayout? = null
+
+    /** Where the type is declared: what a click on the summary row goes to. */
+    private var definitions: List<DefinitionSite> = emptyList()
 
     private var nodePaths = IdentityHashMap<LayoutNode, TreePath>()
 
@@ -144,6 +165,7 @@ class MemoryLayoutPanel(
         controls.add(targetControl)
         controls.add(cacheLineControl)
         controls.add(byteWidthControl)
+        controls.add(countControl)
         val wrapper = JPanel(BorderLayout())
         wrapper.add(actionToolbar.component, BorderLayout.WEST)
         wrapper.add(controls, BorderLayout.CENTER)
@@ -263,6 +285,62 @@ class MemoryLayoutPanel(
         }
     }
 
+    /**
+     * How many elements a `string` or an array holds, for this tab only: another tab's array is
+     * another array. Shown only when the type has elements to count; empty means "n", and every
+     * size stays a formula in it.
+     */
+    private inner class CountControl : JPanel(FlowLayout(FlowLayout.LEFT, CONTROL_GAP, 0)) {
+
+        private val countField = JBTextField(COUNT_COLUMNS)
+
+        init {
+            val label = JLabel(MemoryLayoutStyle.COUNT_LABEL)
+            label.toolTipText = MemoryLayoutStyle.COUNT_DESCRIPTION
+            countField.toolTipText = MemoryLayoutStyle.COUNT_DESCRIPTION
+            countField.addActionListener {
+                applyCount()
+            }
+            countField.addFocusListener(object : FocusAdapter() {
+                override fun focusLost(event: FocusEvent) {
+                    applyCount()
+                }
+            })
+            add(label)
+            add(countField)
+            isVisible = false
+        }
+
+        private fun applyCount() {
+            val text = countField.text.trim()
+            val wanted: Int
+            if (text.isEmpty()) {
+                wanted = RepeatTail.UNKNOWN_COUNT
+            } else {
+                val parsed = text.toIntOrNull()
+                if (parsed == null || parsed < 0 || parsed > MAXIMUM_COUNT) {
+                    // Not a count: put back the one in force rather than guess what was meant.
+                    showCount()
+                    return
+                }
+                wanted = parsed
+            }
+            if (wanted == elementCount) {
+                return
+            }
+            elementCount = wanted
+            recompute()
+        }
+
+        fun showCount() {
+            if (elementCount == RepeatTail.UNKNOWN_COUNT) {
+                countField.text = ""
+            } else {
+                countField.text = elementCount.toString()
+            }
+        }
+    }
+
     /** How wide one byte is drawn. Four characters by default, and squeezable when a type is big. */
     private inner class ByteWidthControl : JPanel(FlowLayout(FlowLayout.LEFT, CONTROL_GAP, 0)) {
 
@@ -342,8 +420,10 @@ class MemoryLayoutPanel(
     fun recompute() {
         val target = MemoryLayoutViewState.target
         ApplicationManager.getApplication().executeOnPooledThread {
-            val computed = LayoutComputer.compute(project, entry, target)
+            val computed = LayoutComputer.compute(project, entry, target, elementCount)
+            val sites = DefinitionSites.of(project, entry)
             ApplicationManager.getApplication().invokeLater {
+                definitions = sites
                 show(computed)
             }
         }
@@ -358,6 +438,7 @@ class MemoryLayoutPanel(
         layout = computed
         tableHolder.removeAll()
         if (computed == null) {
+            headerLabel.isVisible = true
             headerLabel.text = "${entry.simpleName}: the declaration could not be read"
             table = null
             brickView.show(emptyList(), MemoryLayoutViewState.cacheLineSize, 0)
@@ -366,10 +447,20 @@ class MemoryLayoutPanel(
             return
         }
         val cacheLineSize = MemoryLayoutViewState.cacheLineSize
+        countControl.isVisible = computed.repeat != null
+        headerLabel.isVisible = true
         headerLabel.text = MemoryLayoutStyle.headerText(computed, cacheLineSize)
         headerLabel.toolTipText = computed.notes.joinToString("\n").ifEmpty { null }
+        val summary = SummaryRow(
+            typeName = computed.displayName,
+            sizeText = MemoryLayoutStyle.sizeText(computed),
+            alignment = computed.alignment,
+            location = DefinitionSites.locationText(definitions, entry),
+            tooltip = computed.notes.joinToString("\n").ifEmpty { null },
+            isNavigable = definitions.isNotEmpty(),
+        )
         val settings = MemoryLayoutSettings.getInstance()
-        val built = LayoutTreeTable.build(project, computed, settings.showPaddingRows, cacheLineSize)
+        val built = LayoutTreeTable.build(project, computed, summary, settings.showPaddingRows, cacheLineSize)
         themeBackground = built.background
         built.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(event: MouseEvent) {
@@ -377,10 +468,35 @@ class MemoryLayoutPanel(
                 if (!SwingUtilities.isLeftMouseButton(event) || event.isControlDown || event.isShiftDown || event.isMetaDown) {
                     return
                 }
-                val node = LayoutTreeTable.nodeAt(built, built.rowAtPoint(event.point))
+                val row = built.rowAtPoint(event.point)
                 // One click shows the declaration and leaves the focus here, so the next row can
                 // be clicked straight away; a double click goes there to edit.
-                navigateTo(node, event.clickCount >= DOUBLE_CLICK)
+                val requestFocus = event.clickCount >= DOUBLE_CLICK
+                if (LayoutTreeTable.isFollowableTypeAt(built, event.point)) {
+                    if (event.clickCount == 1) {
+                        followReference(LayoutTreeTable.nodeAt(built, row), event)
+                    }
+                    return
+                }
+                if (LayoutTreeTable.isSummaryRow(built, row)) {
+                    // The second click of a double click would open the chooser of a partial
+                    // type a second time, on top of the first.
+                    if (event.clickCount == 1 || definitions.size == 1) {
+                        DefinitionSites.navigate(project, definitions, event, requestFocus)
+                    }
+                    return
+                }
+                navigateTo(LayoutTreeTable.nodeAt(built, row), requestFocus)
+            }
+        })
+        built.addMouseMotionListener(object : MouseAdapter() {
+            override fun mouseMoved(event: MouseEvent) {
+                // The hand says the type of a reference is a link before anyone has to guess.
+                if (LayoutTreeTable.isFollowableTypeAt(built, event.point)) {
+                    built.cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+                } else {
+                    built.cursor = Cursor.getDefaultCursor()
+                }
             }
         })
         // A selection is held by row, and unfolding a selected struct puts rows on screen that
@@ -468,6 +584,73 @@ class MemoryLayoutPanel(
     }
 
     /**
+     * Opens what a reference points at, in a tab of its own: the class, or the array with its
+     * element type. Looked up on a pooled thread -- the assemblies may not have been read yet --
+     * and a name that means several types asks which, right where the click was.
+     */
+    private fun followReference(node: LayoutNode?, event: MouseEvent) {
+        if (node == null) {
+            return
+        }
+        val context = LookupContext(
+            namespaceName = entry.namespaceName,
+            containerNames = entry.containerNames + entry.simpleName,
+            fileId = node.fileId,
+        )
+        val where = RelativePoint(event)
+        val typeName = node.typeName
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val candidates = TypeCandidates.of(project, typeName, context)
+            ApplicationManager.getApplication().invokeLater {
+                openFollowed(typeName, candidates, where)
+            }
+        }
+    }
+
+    private fun openFollowed(typeName: String, candidates: List<IndexedType>, where: RelativePoint) {
+        if (candidates.isEmpty()) {
+            JBPopupFactory.getInstance()
+                .createMessage(String.format(MemoryLayoutStyle.NOT_FOUND_TEXT, typeName))
+                .show(where)
+            return
+        }
+        if (candidates.size == 1) {
+            MemoryLayoutToolWindowService.getInstance(project).open(candidates.first())
+            return
+        }
+        JBPopupFactory.getInstance()
+            .createPopupChooserBuilder(candidates)
+            .setTitle(MemoryLayoutStyle.AMBIGUOUS_TITLE)
+            .setRenderer(CandidateRenderer())
+            .setItemChosenCallback { chosen ->
+                MemoryLayoutToolWindowService.getInstance(project).open(chosen)
+            }
+            .createPopup()
+            .show(where)
+    }
+
+    /** A candidate as its qualified name and where it comes from. */
+    private class CandidateRenderer : DefaultListCellRenderer() {
+
+        override fun getListCellRendererComponent(
+            list: JList<*>,
+            value: Any?,
+            index: Int,
+            isSelected: Boolean,
+            hasFocus: Boolean,
+        ): Component {
+            val entry = value as? IndexedType
+            val text: String
+            if (entry == null) {
+                text = value?.toString() ?: ""
+            } else {
+                text = entry.qualifiedName + "   " + entry.filePresentableName
+            }
+            return super.getListCellRendererComponent(list, text, index, isSelected, hasFocus)
+        }
+    }
+
+    /**
      * Opens the file a row's field is declared in, with the caret on the field's name. A field read
      * from an assembly has no file -- its id starts with `metadata:` -- and a click on it does
      * nothing rather than guess.
@@ -477,11 +660,16 @@ class MemoryLayoutPanel(
             return
         }
         val file = VirtualFileManager.getInstance().findFileByUrl(node.fileId) ?: return
-        var offset = node.declarationOffset
-        val document = FileDocumentManager.getInstance().getDocument(file)
-        if (document != null && offset < document.textLength) {
-            val masked = CodeMask.of(document.immutableCharSequence.toString())
-            offset = SourceText.nameOffsetInStatement(masked, offset, node.fieldName)
+        // The document is model: reading it on the UI thread needs a read action, or the IDE logs
+        // a threading error on every click.
+        val offset = ReadAction.compute<Int, RuntimeException> {
+            val document = FileDocumentManager.getInstance().getDocument(file)
+            if (document != null && node.declarationOffset < document.textLength) {
+                val masked = CodeMask.of(document.immutableCharSequence.toString())
+                SourceText.nameOffsetInStatement(masked, node.declarationOffset, node.fieldName)
+            } else {
+                node.declarationOffset
+            }
         }
         OpenFileDescriptor(project, file, offset).navigate(requestFocus)
     }
@@ -511,6 +699,12 @@ class MemoryLayoutPanel(
         private const val BUTTON_INSET = 6
 
         private const val SLIDER_WIDTH = 96
+
+        /** Characters the `n =` field shows. */
+        private const val COUNT_COLUMNS = 6
+
+        /** A count past this is a typo, not an array anybody allocates. */
+        private const val MAXIMUM_COUNT = 100_000_000
 
         private const val DIVIDER_SIZE = 6
 

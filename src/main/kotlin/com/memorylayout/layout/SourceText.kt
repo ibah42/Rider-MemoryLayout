@@ -166,6 +166,12 @@ object SourceText {
                     position = end
                 }
                 '}' -> {
+                    if (parenthesisDepth > 0 || bracketDepth > 0) {
+                        // The close of a brace the `{` branch skipped for the same reason:
+                        // `[Attribute(Values = new [] { typeof(int) })]`, `Call(x => { ... })`.
+                        position++
+                        continue
+                    }
                     // The block being walked ended earlier than `to` said. Nothing left to read.
                     return statements
                 }

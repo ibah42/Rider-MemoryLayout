@@ -2,6 +2,7 @@ package com.memorylayout.index
 
 import com.memorylayout.layout.CodeMask
 import com.memorylayout.layout.DeclaredType
+import com.memorylayout.layout.LookupContext
 import com.memorylayout.layout.PartialTypes
 import com.memorylayout.layout.TypeDeclaration
 import com.memorylayout.layout.TypeKind
@@ -22,6 +23,15 @@ import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.vfs.newvfs.BulkFileListener
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent
+
+/**
+ * The element of an array tab, and where its name was written -- which decides what `Item` means
+ * when two namespaces declare one.
+ */
+data class ArrayElement(
+    val typeName: String,
+    val context: LookupContext,
+)
 
 /**
  * One type declaration, remembered by where it lives rather than by its contents.
@@ -50,10 +60,19 @@ data class IndexedType(
      * `List<int> ids`. Empty for the open declaration.
      */
     val typeArguments: List<String> = emptyList(),
+
+    /** Set when this is a lambda's closure class rather than a type somebody asked for by name. */
+    val closure: ClosureSource? = null,
+
+    /** Set when this is `T[]`: there is no declaration, the runtime defines the layout. */
+    val arrayElement: ArrayElement? = null,
 ) {
     /** `List<int>` for a bound generic, the plain name otherwise: what a tab is titled. */
     val displayName: String
         get() {
+            if (closure != null) {
+                return closure.title
+            }
             if (typeArguments.isEmpty()) {
                 return simpleName
             }

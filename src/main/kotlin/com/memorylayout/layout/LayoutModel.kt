@@ -124,11 +124,18 @@ enum class NodeKind {
     UNRESOLVED,
 
     /**
-     * Bytes the runtime owns rather than the programmer: the object header and the method table
-     * pointer of a class. They are not fields and no source declares them, but they are what the
+     * Bytes the runtime owns rather than the programmer: the vtable and monitor pointers that
+     * start every object. They are not fields and no source declares them, but they are what the
      * first field's offset is measured from, so leaving them out would be a lie by omission.
      */
     RUNTIME,
+
+    /**
+     * The same element over and over, to the end of the object: the characters of a `string`,
+     * the elements of an array. One allocation holds the header and all of them, and how many
+     * there are is not a fact about the type. The node's children are element `[0]`.
+     */
+    REPEAT,
 }
 
 /**
@@ -162,6 +169,25 @@ data class LayoutNode(
     val isReference: Boolean = false,
     val overlapsPrevious: Boolean = false,
     val children: List<LayoutNode> = emptyList(),
+
+    /** A [NodeKind.REPEAT]: the distance from one element to the next. */
+    val repeatStride: Int = 0,
+
+    /** A [NodeKind.REPEAT]: how many elements, as the reader should see it -- `n`, `n + 1`, `101`. */
+    val repeatCountText: String = "",
+
+    /**
+     * Set on the copies the brick view draws for the elements of a [NodeKind.REPEAT] -- `[1]`,
+     * `[2]`, `… × n` -- and on the copies of their members: the node of the table they stand for.
+     * The views select and colour by that node, so a copy lights up with its row.
+     */
+    val repeatSource: LayoutNode? = null,
+
+    /** Which element a copy stands for; 0 is the first. */
+    val repeatCopyIndex: Int = 0,
+
+    /** The copy standing for all the elements not drawn one by one. */
+    val isRepeatEllipsis: Boolean = false,
 ) {
     val endOffset: Int
         get() = offset + size
@@ -183,6 +209,42 @@ enum class LayoutConfidence {
     RUNTIME_DEFINED,
 }
 
+/**
+ * The part of an object that repeats: where it starts, how far apart the elements are, and how
+ * many there are when the reader said.
+ *
+ * @param extraElements elements the runtime adds on its own: a string's terminating zero
+ * @param elementCount the reader's `n`, or [UNKNOWN_COUNT] -- then every size is a formula
+ */
+data class RepeatTail(
+    val offset: Int,
+    val stride: Int,
+    val elementTypeName: String,
+    val extraElements: Int,
+    val elementCount: Int,
+) {
+    val isCountKnown: Boolean
+        get() = elementCount != UNKNOWN_COUNT
+
+    /** `n`, `n + 1`, or the number itself. */
+    val countText: String
+        get() {
+            if (isCountKnown) {
+                return (elementCount + extraElements).toString()
+            }
+            if (extraElements == 0) {
+                return COUNT_SYMBOL
+            }
+            return "$COUNT_SYMBOL + $extraElements"
+        }
+
+    companion object {
+        const val UNKNOWN_COUNT = -1
+
+        const val COUNT_SYMBOL = "n"
+    }
+}
+
 /** The finished layout of one type. */
 data class TypeLayout(
     val displayName: String,
@@ -200,6 +262,12 @@ data class TypeLayout(
 
     /** Anything the header should say out loud: unresolved types, overlaps, an applied `Size`. */
     val notes: List<String> = emptyList(),
+
+    /**
+     * The repeating end of a `string` or an array, or null. When its count is unknown, [size] is
+     * the object with no elements beyond [RepeatTail.extraElements].
+     */
+    val repeat: RepeatTail? = null,
 ) {
     val isBlittable: Boolean
         get() = blittableProblems.isEmpty()

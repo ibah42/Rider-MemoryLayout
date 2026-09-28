@@ -21,15 +21,21 @@ class LayoutEngine(
     /**
      * @param typeArguments what the declaration's type parameters are bound to -- `int` for a
      *   `List<int>` variable -- or empty for the open declaration
+     * @param elementCount the reader's `n` for a type that ends in repeating elements -- a
+     *   `string`'s characters -- or [RepeatTail.UNKNOWN_COUNT]
      */
-    fun layoutOf(type: DeclaredType, typeArguments: List<String> = emptyList()): TypeLayout {
+    fun layoutOf(
+        type: DeclaredType,
+        typeArguments: List<String> = emptyList(),
+        elementCount: Int = RepeatTail.UNKNOWN_COUNT,
+    ): TypeLayout {
         val declaration = type.declaration
         val arguments = GenericName.bind(declaration.genericParameters, typeArguments)
         val result: StructResult
         if (declaration.isValueType) {
             result = buildStruct(type, HashSet(), 0, arguments)
         } else {
-            result = buildObject(type, HashSet(), arguments)
+            result = buildObject(type, HashSet(), arguments, elementCount)
         }
         val displayName: String
         if (arguments.isEmpty()) {
@@ -57,7 +63,163 @@ class LayoutEngine(
             confidence = confidence,
             blittableProblems = result.blittableProblems,
             notes = type.notes + result.notes + PartialTypes.notesFor(type),
+            repeat = result.repeat,
         )
+    }
+
+    /**
+     * `T[]` as it sits on the heap in Mono and IL2CPP: one allocation holding the vtable, the
+     * monitor, the bounds pointer (null for a one-dimensional array), the length, and then every
+     * element inline, from 0x20 on x64 and 0x10 on x86. An element that is a class is a reference
+     * here; its object is somewhere else.
+     *
+     * @param context where the element's name was written, for resolving it
+     */
+    fun layoutOfArray(
+        elementTypeName: String,
+        context: LookupContext,
+        elementCount: Int = RepeatTail.UNKNOWN_COUNT,
+    ): TypeLayout {
+        val pointerSize = target.pointerSize
+        val nodes = ArrayList<LayoutNode>()
+        val notes = ArrayList<String>()
+        nodes.add(runtimeNode(0, pointerSize, VTABLE_TYPE, VTABLE_NAME))
+        nodes.add(runtimeNode(pointerSize, pointerSize, MONITOR_TYPE, MONITOR_NAME))
+        nodes.add(runtimeNode(pointerSize * 2, pointerSize, ARRAY_BOUNDS_TYPE, ARRAY_BOUNDS_NAME))
+        nodes.add(runtimeNode(pointerSize * 3, pointerSize, ARRAY_LENGTH_TYPE, ARRAY_LENGTH_NAME))
+        val dataOffset = roundUp(pointerSize * ARRAY_HEADER_POINTERS, ALLOCATION_ALIGNMENT)
+        val element = placeField(
+            FieldDeclaration(typeName = elementTypeName, name = ELEMENT_NAME),
+            context,
+            HashSet(),
+            1,
+        )
+        val displayName = elementTypeName + ARRAY_SUFFIX
+        if (!element.isResolved) {
+            nodes.add(
+                LayoutNode(
+                    kind = NodeKind.UNRESOLVED,
+                    offset = dataOffset,
+                    size = 0,
+                    alignment = 1,
+                    typeName = elementTypeName,
+                    fieldName = ELEMENT_NAME,
+                )
+            )
+            notes.add("The element type $elementTypeName could not be resolved, so its size is unknown")
+            return TypeLayout(
+                displayName = displayName,
+                qualifiedName = displayName,
+                target = target,
+                declaredLayoutKind = DeclaredLayoutKind.SEQUENTIAL,
+                size = dataOffset,
+                alignment = pointerSize,
+                paddingBytes = 0,
+                nodes = nodes,
+                confidence = LayoutConfidence.APPROXIMATE,
+                notes = notes,
+            )
+        }
+        val alignment = max(element.alignment, 1)
+        val stride = roundUp(element.size, alignment)
+        val tail = RepeatTail(
+            offset = dataOffset,
+            stride = stride,
+            elementTypeName = elementTypeName,
+            extraElements = 0,
+            elementCount = elementCount,
+        )
+        nodes.add(
+            repeatNode(
+                tail = tail,
+                alignment = alignment,
+                fieldName = "[0 … ${tail.countText})",
+                elementChildren = shiftNodes(element.children, dataOffset),
+                isReference = element.isReference,
+            )
+        )
+        val size = finishRepeat(nodes, tail)
+        notes.add(
+            "One allocation: vtable, monitor, bounds (null for a one-dimensional array), length, then " +
+                "the elements inline from $dataOffset, $stride B apart"
+        )
+        if (element.isReference) {
+            notes.add(
+                "Every element is a $pointerSize B reference: the $elementTypeName objects themselves " +
+                    "are separate allocations"
+            )
+        }
+        val confidence: LayoutConfidence
+        if (element.isGuess) {
+            confidence = LayoutConfidence.APPROXIMATE
+        } else {
+            confidence = LayoutConfidence.EXACT
+        }
+        return TypeLayout(
+            displayName = displayName,
+            qualifiedName = displayName,
+            target = target,
+            declaredLayoutKind = DeclaredLayoutKind.SEQUENTIAL,
+            size = size,
+            alignment = pointerSize,
+            paddingBytes = paddingBytesOf(nodes),
+            nodes = nodes,
+            confidence = confidence,
+            notes = notes,
+            repeat = tail,
+        )
+    }
+
+    /**
+     * The row standing for every element: one element's worth of bytes while the count is
+     * unknown, all of them once it is known, element `[0]` as its children.
+     */
+    private fun repeatNode(
+        tail: RepeatTail,
+        alignment: Int,
+        fieldName: String,
+        elementChildren: List<LayoutNode>,
+        isReference: Boolean,
+        declarationOffset: Int = -1,
+        fileId: String = "",
+    ): LayoutNode {
+        val size: Int
+        if (tail.isCountKnown) {
+            size = tail.stride * (tail.elementCount + tail.extraElements)
+        } else {
+            size = tail.stride
+        }
+        return LayoutNode(
+            kind = NodeKind.REPEAT,
+            offset = tail.offset,
+            size = size,
+            alignment = alignment,
+            typeName = tail.elementTypeName,
+            fieldName = fieldName,
+            declarationOffset = declarationOffset,
+            fileId = fileId,
+            isReference = isReference,
+            children = elementChildren,
+            repeatStride = tail.stride,
+            repeatCountText = tail.countText,
+        )
+    }
+
+    /**
+     * The size of an object ending in [tail]. With the count known it is the whole allocation,
+     * rounded up to the collector's 8 bytes with the rounding shown as padding; without it, the
+     * object holding only the elements the runtime always adds.
+     */
+    private fun finishRepeat(nodes: MutableList<LayoutNode>, tail: RepeatTail): Int {
+        if (!tail.isCountKnown) {
+            return tail.offset + tail.stride * tail.extraElements
+        }
+        val end = tail.offset + tail.stride * (tail.elementCount + tail.extraElements)
+        val size = roundUp(end, ALLOCATION_ALIGNMENT)
+        if (size > end) {
+            nodes.add(paddingNode(end, size - end))
+        }
+        return size
     }
 
     /** What one declaration turned into, with its children already at their absolute offsets. */
@@ -69,6 +231,7 @@ class LayoutEngine(
         val isRuntimeDefined: Boolean,
         val blittableProblems: List<String>,
         val notes: List<String>,
+        val repeat: RepeatTail? = null,
     )
 
     /** What one field turned into, with its children still relative to the field's own start. */
@@ -86,28 +249,32 @@ class LayoutEngine(
     )
 
     /**
-     * A class instance, as it sits on the heap.
+     * A class instance, as it sits on the heap -- in Unity, which means Mono or IL2CPP.
      *
      * Three things make it a different job from a struct, and all three are invisible in the
      * source:
      *
-     * - **The object header** is eight bytes at offset -8 (four at -4 on a 32-bit runtime): the
-     *   sync block index, which carries the lock state, the hash code and the GC's bits. It lives
-     *   *before* the reference, which is why no field ever sits at offset 0.
-     * - **The method table pointer** is at offset 0. It is the type handle, and the vtable is
-     *   inside what it points at -- .NET has no per-object vtable pointer the way C++ does, one
-     *   pointer does identity and dispatch both.
+     * - **The object header is two pointers at the start of the object**, where the reference
+     *   points: the vtable (Mono's `MonoVTable*`, IL2CPP's `Il2CppClass*`), which is the type's
+     *   identity and its dispatch table both, then the monitor, which carries the lock and, once
+     *   asked for, the hash code. Fields begin after them, at 0x10 on x64 and 0x8 on x86. This is
+     *   not CoreCLR, which keeps its sync block before the reference.
      * - **The base class comes first.** `Enemy : Actor` puts `Actor`'s fields right after the
-     *   method table pointer, then its own.
+     *   header, then its own.
+     * - **Each class's own fields go in two passes** unless the class says
+     *   `[StructLayout(LayoutKind.Sequential)]` or `Explicit`: the references first, so that the
+     *   collector finds them together, then everything else -- each pass in declaration order,
+     *   each field at its own alignment. That is Mono's `mono_class_layout_fields`; it does not
+     *   sort by size.
      *
-     * The size reported is measured from the reference, so the header is named in the notes rather
-     * than counted here; everything the rest of this class does with offsets then stays positive.
-     * An allocation is never smaller than 24 bytes on x64 (12 on x86), header included.
+     * A `string` is the one class whose instance does not end at its last field: its characters
+     * follow `_firstChar`, so it gets no tail padding and its size is that of the empty string.
      */
     private fun buildObject(
         type: DeclaredType,
         visiting: MutableSet<String>,
         arguments: Map<String, String>,
+        elementCount: Int,
     ): StructResult {
         val declaration = type.declaration
         val attribute = FieldReader.readLayoutAttribute(declaration)
@@ -116,11 +283,12 @@ class LayoutEngine(
         val notes = ArrayList<String>()
         val problems = ArrayList<String>()
         val pointerSize = target.pointerSize
-        nodes.add(runtimeNode(-pointerSize, pointerSize, OBJECT_HEADER_TYPE, OBJECT_HEADER_NAME))
-        nodes.add(runtimeNode(0, pointerSize, METHOD_TABLE_TYPE, METHOD_TABLE_NAME))
-        var offset = pointerSize
+        nodes.add(runtimeNode(0, pointerSize, VTABLE_TYPE, VTABLE_NAME))
+        nodes.add(runtimeNode(pointerSize, pointerSize, MONITOR_TYPE, MONITOR_NAME))
+        var offset = pointerSize * HEADER_POINTERS
         var maxAlignment = pointerSize
         var unresolvedCount = 0
+        var reordered = false
         val objectFields = ArrayList<FieldDeclaration>()
         val objectPlacements = ArrayList<Pair<FieldDeclaration, FieldPlacement>>()
         for (holder in chain) {
@@ -129,10 +297,18 @@ class LayoutEngine(
                 containerNames = holder.declaration.containerNames + holder.declaration.name,
                 fileId = holder.fileId,
             )
+            val holderAttribute = FieldReader.readLayoutAttribute(holder.declaration)
+            val placed = ArrayList<Pair<FieldDeclaration, FieldPlacement>>()
             for (declared in FieldReader.readFields(holder)) {
                 val field = substituted(declared, arguments)
+                placed.add(Pair(field, placeField(field, context, visiting, 1)))
+            }
+            val ordered = runtimeOrderOf(placed, holderAttribute.kind)
+            if (ordered != placed) {
+                reordered = true
+            }
+            for ((field, shape) in ordered) {
                 objectFields.add(field)
-                val shape = placeField(field, context, visiting, 1)
                 objectPlacements.add(Pair(field, shape))
                 val alignment = capAlignment(shape.alignment, attribute.pack)
                 val aligned = roundUp(offset, alignment)
@@ -148,18 +324,53 @@ class LayoutEngine(
                 maxAlignment = max(maxAlignment, alignment)
             }
         }
-        val size = max(roundUp(offset, maxAlignment), pointerSize * MINIMUM_OBJECT_POINTERS)
-        if (size > offset) {
-            nodes.add(paddingNode(offset, size - offset))
+        val size: Int
+        var repeat: RepeatTail? = null
+        val firstCharIndex = nodes.indexOfLast { node -> node.kind == NodeKind.FIELD }
+        if (declaration.qualifiedName == STRING_TYPE && firstCharIndex >= 0) {
+            // The characters run on from `_firstChar`, which is the first of them: what looked
+            // like two bytes of tail padding is the string. The runtime adds a terminating zero.
+            val firstChar = nodes[firstCharIndex]
+            val tail = RepeatTail(
+                offset = firstChar.offset,
+                stride = firstChar.size,
+                elementTypeName = firstChar.typeName,
+                extraElements = 1,
+                elementCount = elementCount,
+            )
+            nodes[firstCharIndex] = repeatNode(
+                tail = tail,
+                alignment = firstChar.alignment,
+                fieldName = STRING_CHARS_NAME,
+                elementChildren = emptyList(),
+                isReference = false,
+                declarationOffset = firstChar.declarationOffset,
+                fileId = firstChar.fileId,
+            )
+            size = finishRepeat(nodes, tail)
+            repeat = tail
+        } else {
+            size = max(roundUp(offset, maxAlignment), pointerSize * HEADER_POINTERS)
+            if (size > offset) {
+                nodes.add(paddingNode(offset, size - offset))
+            }
         }
         notes.add(
-            "The object header adds $pointerSize B before the reference: the allocation is " +
-                (size + pointerSize) + " B"
+            "Mono and IL2CPP start every object with a $pointerSize B vtable pointer and a " +
+                "$pointerSize B monitor; the allocation is $size B, rounded up to 8 by the collector"
         )
-        notes.add(
-            "A class is laid out by the runtime (LayoutKind.Auto): the order here is the order of " +
-                "declaration, base class first, which is a useful picture and not a promise"
-        )
+        if (reordered) {
+            notes.add(
+                "A class is laid out by the runtime (LayoutKind.Auto): references first, then the " +
+                    "rest, each in declaration order -- the order Mono uses, which is why it differs " +
+                    "from the source"
+            )
+        } else {
+            notes.add(
+                "A class is laid out by the runtime (LayoutKind.Auto) unless it says otherwise: " +
+                    "references first, then the rest, each in declaration order"
+            )
+        }
         if (chain.size > 1) {
             notes.add("Fields of " + chain.dropLast(1).joinToString(", ") { holder ->
                 holder.declaration.name
@@ -177,7 +388,24 @@ class LayoutEngine(
             isRuntimeDefined = true,
             blittableProblems = problems,
             notes = notes,
+            repeat = repeat,
         )
+    }
+
+    /**
+     * The order Mono gives one class's own fields: references first, then everything else, each
+     * group in declaration order. A class that asked for `Sequential` or `Explicit` keeps its order.
+     */
+    private fun runtimeOrderOf(
+        placed: List<Pair<FieldDeclaration, FieldPlacement>>,
+        kind: DeclaredLayoutKind,
+    ): List<Pair<FieldDeclaration, FieldPlacement>> {
+        if (kind != DeclaredLayoutKind.AUTO) {
+            return placed
+        }
+        val references = placed.filter { pair -> pair.second.isReference }
+        val rest = placed.filterNot { pair -> pair.second.isReference }
+        return references + rest
     }
 
     /** The declaration and everything it inherits from, most-base first. */
@@ -620,6 +848,11 @@ class LayoutEngine(
         if (!inner.isResolved) {
             return unresolvedPlacement()
         }
+        if (inner.isReference) {
+            // `Exception?`, `string?`: a nullable reference type is an annotation for the
+            // compiler, not a Nullable<T>. In memory it is the same one pointer, null or not.
+            return inner
+        }
         val alignment = max(inner.alignment, 1)
         val valueOffset = roundUp(1, alignment)
         val size = roundUp(valueOffset + inner.size, alignment)
@@ -804,15 +1037,37 @@ class LayoutEngine(
 
         private const val NULLABLE_PROBLEM = "Nullable<T> carries a flag alongside the value"
 
-        private const val OBJECT_HEADER_TYPE = "sync block"
+        private const val VTABLE_TYPE = "vtable*"
 
-        private const val OBJECT_HEADER_NAME = "object header"
+        private const val VTABLE_NAME = "vtable"
 
-        private const val METHOD_TABLE_TYPE = "MethodTable*"
+        private const val MONITOR_TYPE = "monitor*"
 
-        private const val METHOD_TABLE_NAME = "type handle"
+        private const val MONITOR_NAME = "monitor"
 
-        /** 24 bytes on x64 and 12 on x86, header included -- three pointers either way. */
-        private const val MINIMUM_OBJECT_POINTERS = 2
+        /** The vtable and the monitor: the smallest object is these two and nothing else. */
+        private const val HEADER_POINTERS = 2
+
+        private const val STRING_TYPE = "System.String"
+
+        private const val STRING_CHARS_NAME = "chars"
+
+        private const val ARRAY_BOUNDS_TYPE = "bounds*"
+
+        private const val ARRAY_BOUNDS_NAME = "bounds"
+
+        private const val ARRAY_LENGTH_TYPE = "uintptr"
+
+        private const val ARRAY_LENGTH_NAME = "max_length"
+
+        /** vtable, monitor, bounds, length: the elements start after these four pointers. */
+        private const val ARRAY_HEADER_POINTERS = 4
+
+        private const val ARRAY_SUFFIX = "[]"
+
+        private const val ELEMENT_NAME = "[0]"
+
+        /** What the collector rounds every allocation up to. */
+        private const val ALLOCATION_ALIGNMENT = 8
     }
 }

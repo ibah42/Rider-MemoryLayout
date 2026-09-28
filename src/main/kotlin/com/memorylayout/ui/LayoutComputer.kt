@@ -1,6 +1,8 @@
 package com.memorylayout.ui
 
+import com.memorylayout.index.ClosureSource
 import com.memorylayout.index.IndexedType
+import com.memorylayout.metadata.Closures
 import com.memorylayout.index.ProjectTypeLookup
 import com.memorylayout.index.RuntimeAssemblyService
 import com.memorylayout.layout.DeclaredType
@@ -10,15 +12,31 @@ import com.memorylayout.layout.LayoutEngine
 import com.memorylayout.layout.LayoutNode
 import com.memorylayout.layout.LayoutTarget
 import com.memorylayout.layout.NodeKind
+import com.memorylayout.layout.RepeatTail
 import com.memorylayout.layout.TypeLayout
 import com.intellij.openapi.project.Project
 
 /** Puts the index, the lookup and the engine together. Runs off the UI thread. */
 object LayoutComputer {
 
-    fun compute(project: Project, entry: IndexedType, target: LayoutTarget): TypeLayout? {
+    /**
+     * @param elementCount the reader's `n` for a `string` or an array, or
+     *   [RepeatTail.UNKNOWN_COUNT] to show the sizes as formulas
+     */
+    fun compute(
+        project: Project,
+        entry: IndexedType,
+        target: LayoutTarget,
+        elementCount: Int = RepeatTail.UNKNOWN_COUNT,
+    ): TypeLayout? {
         val index = TypeIndexService.getInstance(project)
         val runtime = RuntimeAssemblyService.getInstance(project)
+        val arrayElement = entry.arrayElement
+        if (arrayElement != null) {
+            // No declaration to read: the runtime defines an array, the element is resolved.
+            val lookup = CompositeTypeLookup(listOf(ProjectTypeLookup(index), runtime.lookup()))
+            return LayoutEngine(target, lookup).layoutOfArray(arrayElement.typeName, arrayElement.context, elementCount)
+        }
         val declared: DeclaredType?
         if (runtime.isRuntimeEntry(entry)) {
             declared = runtime.declaredTypeOf(entry)
@@ -30,8 +48,38 @@ object LayoutComputer {
         }
         // The project answers first: its own `Entry` is the one its code means. The assemblies
         // answer for everything it does not declare -- `Guid`, `List<T>`, `Vector3`.
-        val lookup = CompositeTypeLookup(listOf(ProjectTypeLookup(index), runtime.lookup()))
-        return LayoutEngine(target, lookup).layoutOf(declared, entry.typeArguments)
+        val lookups = arrayListOf(ProjectTypeLookup(index), runtime.lookup())
+        val closure = entry.closure
+        if (closure != null) {
+            // A closure may point at the enclosing scope's closure, another compiler-made class.
+            lookups.add(runtime.scriptAssemblyLookup())
+        }
+        val layout = LayoutEngine(target, CompositeTypeLookup(lookups)).layoutOf(declared, entry.typeArguments, elementCount)
+        if (closure == null) {
+            return layout
+        }
+        return asClosure(layout, closure)
+    }
+
+    /**
+     * The closure class dressed as the lambda's: fields named as the reader wrote the variables,
+     * each pointing at its declaration, and the notes about when it is allocated first.
+     */
+    private fun asClosure(layout: TypeLayout, closure: ClosureSource): TypeLayout {
+        val nodes = layout.nodes.map { node ->
+            if (node.kind == NodeKind.PADDING || node.kind == NodeKind.RUNTIME) {
+                node
+            } else {
+                val offset = closure.declarationOffsets[node.fieldName]
+                if (offset == null) {
+                    node.copy(fieldName = Closures.labelOf(node.fieldName))
+                } else {
+                    node.copy(fieldName = Closures.labelOf(node.fieldName), fileId = closure.fileUrl, declarationOffset = offset)
+                }
+            }
+        }
+        val notes = closure.notes + layout.notes.filterNot { note -> note.startsWith(METADATA_NOTE_PREFIX) }
+        return layout.copy(displayName = closure.title, nodes = nodes, notes = notes)
     }
 
     /** The layout as plain text, for the clipboard. */
@@ -106,6 +154,9 @@ object LayoutComputer {
             "  " + (indent + typeName).padEnd(TYPE_WIDTH) +
             name + "\n"
     }
+
+    /** The metadata lookup's own note; a closure says where it came from more precisely. */
+    private const val METADATA_NOTE_PREFIX = "Read from the metadata of"
 
     private const val HEX_WIDTH = 8
 

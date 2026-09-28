@@ -5,6 +5,7 @@ import com.memorylayout.layout.CacheLineMath
 import com.memorylayout.layout.LayoutConfidence
 import com.memorylayout.layout.LayoutNode
 import com.memorylayout.layout.NodeKind
+import com.memorylayout.layout.RepeatTail
 import com.memorylayout.layout.TypeLayout
 import com.memorylayout.settings.MemoryLayoutSettings
 import com.memorylayout.settings.WindowBackground
@@ -44,7 +45,7 @@ object MemoryLayoutStyle {
     /** A field that holds a pointer: an interface, a class, an array, a string, a delegate. */
     val referenceForeground = JBColor(Color(0x00, 0xA0, 0xC6), Color(0x4F, 0xD8, 0xFF))
 
-    /** Bytes the runtime owns: the object header and the method table pointer of a class. */
+    /** Bytes the runtime owns: the vtable and monitor pointers that start every object. */
     val runtimeForeground = JBColor(Color(0x00, 0x86, 0xA8), Color(0x6F, 0xE3, 0xFF))
 
     val paddingForeground = JBColor(Color(0xE0, 0x7A, 0x00), Color(0xFF, 0xA8, 0x3D))
@@ -238,6 +239,20 @@ object MemoryLayoutStyle {
 
     const val REFERENCE_MARKER = "ref"
 
+    /** After the type of a reference: a click on the type opens what it points at. */
+    const val FOLLOW_MARKER = "→"
+
+    const val FOLLOW_TOOLTIP = "Click the type to open the layout of what this points at"
+
+    const val STRIDE_MARKER = "stride"
+
+    const val COUNT_LABEL = "n ="
+
+    const val COUNT_DESCRIPTION =
+        "How many elements this string or array holds. Empty keeps every size a formula in n."
+
+    const val NOT_FOUND_TEXT = "Nothing named %s in the sources or the referenced assemblies"
+
     const val SPLIT_MARKER = "split"
 
     const val AUTO_PROPERTY_MARKER = "auto"
@@ -248,10 +263,9 @@ object MemoryLayoutStyle {
 
     const val COLUMN_DECIMAL = "dec"
 
-    /** Three characters at most: the column is sized for three digits and the title must fit. */
-    const val COLUMN_SIZE = "sz"
+    const val COLUMN_SIZE = "size"
 
-    const val COLUMN_ALIGNMENT = "al"
+    const val COLUMN_ALIGNMENT = "align"
 
     const val COLUMN_TYPE = "type"
 
@@ -295,7 +309,7 @@ object MemoryLayoutStyle {
     const val CACHE_LINE_DESCRIPTION =
         "The cache line to measure against. 64 on x86-64 and ARM64, 128 on Apple silicon, 32 on older ARM."
 
-    const val BYTE_WIDTH_LABEL = "byte"
+    const val BYTE_WIDTH_LABEL = "bricks scale"
 
     const val BYTE_WIDTH_DESCRIPTION = "How wide one byte is drawn in the brick view"
 
@@ -343,10 +357,15 @@ object MemoryLayoutStyle {
 
     const val AMBIGUOUS_TITLE = "Several types with this name"
 
+    const val PARTIAL_CHOOSER_TITLE = "Declared in several files"
+
+    const val DEFINITION_TOOLTIP = "Click to go to the declaration"
+
+
     fun headerText(layout: TypeLayout): String {
         val parts = ArrayList<String>()
         parts.add(layout.displayName)
-        parts.add("${layout.size} B")
+        parts.add("${sizeText(layout)} B")
         parts.add("align ${layout.alignment}")
         parts.add(paddingText(layout))
         parts.add(confidenceText(layout))
@@ -363,6 +382,10 @@ object MemoryLayoutStyle {
      * it gives you for the first element and for every element whose size divides the line.
      */
     fun cacheLineText(layout: TypeLayout, cacheLineSize: Int): String {
+        val repeat = layout.repeat
+        if (repeat != null && !repeat.isCountKnown) {
+            return repeatLineText(repeat, cacheLineSize)
+        }
         // From where the object really starts: a class's allocation begins at its header, eight
         // bytes before the reference the offsets are measured from.
         val span = layout.size - BrickLayout.lowestOffset(layout.nodes)
@@ -378,6 +401,53 @@ object MemoryLayoutStyle {
             return head
         }
         return "$head, $spare B spare"
+    }
+
+    /**
+     * How the elements fall on lines while their number is unknown: how many share the first line
+     * with the header, and how many fit in each line after it.
+     */
+    private fun repeatLineText(repeat: RepeatTail, cacheLineSize: Int): String {
+        if (repeat.stride <= 0) {
+            return ""
+        }
+        if (repeat.stride > cacheLineSize) {
+            return "each element spans ${(repeat.stride + cacheLineSize - 1) / cacheLineSize} $cacheLineSize B lines"
+        }
+        val firstLineRoom = cacheLineSize - repeat.offset % cacheLineSize
+        val inFirstLine = firstLineRoom / repeat.stride
+        val perLine = cacheLineSize / repeat.stride
+        return "$inFirstLine element(s) share the first $cacheLineSize B line with the header, $perLine per line after"
+    }
+
+    /** `224`, or `22 + 2·n` while the elements of a `string` or an array are not counted. */
+    fun sizeText(layout: TypeLayout): String {
+        val repeat = layout.repeat
+        if (repeat == null || repeat.isCountKnown) {
+            return layout.size.toString()
+        }
+        return "${layout.size} + ${repeat.stride}·${RepeatTail.COUNT_SYMBOL}"
+    }
+
+    /** What a repeating row costs: `4·n`, `2·(n + 1)`, or the number once the count is known. */
+    fun repeatSizeText(node: LayoutNode): String {
+        val count = node.repeatCountText
+        if (count.toIntOrNull() != null) {
+            return node.size.toString()
+        }
+        if (count.contains(' ')) {
+            return "${node.repeatStride}·($count)"
+        }
+        return "${node.repeatStride}·$count"
+    }
+
+    /** `int × n`, `char × (n + 1)`, `Vector3 × 100`. */
+    fun repeatTypeText(node: LayoutNode): String {
+        val count = node.repeatCountText
+        if (count.contains(' ')) {
+            return "${node.typeName} × ($count)"
+        }
+        return "${node.typeName} × $count"
     }
 
     fun paddingText(layout: TypeLayout): String {
@@ -424,8 +494,18 @@ object MemoryLayoutStyle {
             NodeKind.UNRESOLVED -> {
                 lines.add("The type ${node.typeName} was not found in the project index")
             }
+            NodeKind.REPEAT -> {
+                lines.add(
+                    "${repeatTypeText(node)}: the elements follow one another to the end of the object, " +
+                        "${node.repeatStride} B apart, in the same allocation. Unfold the row for element [0]."
+                )
+                if (node.isReference) {
+                    lines.add("Each element is a reference. $FOLLOW_TOOLTIP.")
+                }
+            }
             else -> {
                 if (node.isReference) {
+                    lines.add(FOLLOW_TOOLTIP)
                     lines.add(
                         "${node.typeName} is held as a reference: this field is one ${node.size}-byte pointer. " +
                             "The object it points at lives on the heap and the runtime lays it out, " +

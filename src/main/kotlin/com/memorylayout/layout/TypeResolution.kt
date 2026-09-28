@@ -129,6 +129,21 @@ object TypeMatching {
             qualifiedName == "$qualifier.$declaredName"
     }
 
+    /**
+     * A bare name against a generic declaration of that name: `MessageLogState` with the caret on
+     * it, meaning `MessageLogState<TPayload>`.
+     *
+     * Only for opening a type by name -- the caret on a declaration or a use, where the arguments
+     * are not part of the identifier under it. A field always writes its arguments, so the engine
+     * keeps to [matches], and `Box` there never means `Box<T>`.
+     */
+    fun matchesOpenDeclaration(declaredName: String, qualifiedName: String, declaredArity: Int, typeName: String): Boolean {
+        if (declaredArity == 0 || GenericName.arityOf(typeName) != 0) {
+            return false
+        }
+        return matches(declaredName, qualifiedName, 0, typeName)
+    }
+
     fun score(declaration: TypeDeclaration, context: LookupContext, fileId: String): Int {
         return score(declaration.namespaceName, declaration.containerNames, context, fileId)
     }

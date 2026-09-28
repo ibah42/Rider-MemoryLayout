@@ -115,8 +115,8 @@ class PartialTypesTest {
             public partial class Enemy : Actor { }
         """.trimIndent()
         val layout = layoutOf(source, "Enemy")
-        assertEquals(8, field(layout, "health").offset)
-        assertEquals(12, field(layout, "damage").offset)
+        assertEquals(16, field(layout, "health").offset)
+        assertEquals(20, field(layout, "damage").offset)
     }
 
     @Test

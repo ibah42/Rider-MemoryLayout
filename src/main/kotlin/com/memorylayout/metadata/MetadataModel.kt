@@ -67,7 +67,21 @@ data class MetadataType(
 
     /** Properties and methods; they take no room in an instance and never reach the layout. */
     val members: List<MetadataMember> = emptyList(),
+
+    /** The name as the metadata spells it: ``<>c__DisplayClass5_0``, ``List`1``. */
+    val rawName: String = name,
+
+    /**
+     * Every method's name as the metadata spells it, kept only for compiler-generated types --
+     * a closure class names its lambdas after the method they came from, `<Update>b__0`, and
+     * that is what ties it back to the source. Empty for every ordinary type.
+     */
+    val compilerMethodNames: List<String> = emptyList(),
 ) {
+    /** A type the C# compiler wrote rather than a person: its name starts with `<`. */
+    val isCompilerGenerated: Boolean
+        get() = rawName.startsWith(COMPILER_GENERATED_PREFIX)
+
     val qualifiedName: String
         get() {
             val parts = ArrayList<String>()
@@ -81,5 +95,7 @@ data class MetadataType(
 
     companion object {
         const val UNSET = 0
+
+        const val COMPILER_GENERATED_PREFIX = "<"
     }
 }

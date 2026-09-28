@@ -171,7 +171,31 @@ object MetadataReader {
                 classSize = layout?.second ?: MetadataType.UNSET,
                 fields = fieldsOf(row, typeCount, genericParameters),
                 members = propertiesOf(row, genericParameters) + methodsOf(row, typeCount, genericParameters),
+                rawName = rawNameOf(row),
+                compilerMethodNames = compilerMethodNamesOf(row, typeCount),
             )
+        }
+
+        private fun rawNameOf(row: Int): String {
+            return image.string(tables.value(MetadataTables.TYPE_DEF, row, MetadataTables.TYPE_DEF_NAME))
+        }
+
+        private fun compilerMethodNamesOf(row: Int, typeCount: Int): List<String> {
+            if (!rawNameOf(row).startsWith(MetadataType.COMPILER_GENERATED_PREFIX)) {
+                return emptyList()
+            }
+            val first = tables.value(MetadataTables.TYPE_DEF, row, MetadataTables.TYPE_DEF_METHOD_LIST)
+            val end: Int
+            if (row < typeCount) {
+                end = tables.value(MetadataTables.TYPE_DEF, row + 1, MetadataTables.TYPE_DEF_METHOD_LIST)
+            } else {
+                end = tables.rowCount(MetadataTables.METHOD_DEF) + 1
+            }
+            val names = ArrayList<String>()
+            for (methodRow in first until end) {
+                names.add(image.string(tables.value(MetadataTables.METHOD_DEF, methodRow, MetadataTables.METHOD_NAME)))
+            }
+            return names
         }
 
         private fun propertiesOf(row: Int, genericParameters: List<String>): List<MetadataMember> {

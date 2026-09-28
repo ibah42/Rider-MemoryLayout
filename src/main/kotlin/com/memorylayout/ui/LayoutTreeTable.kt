@@ -15,7 +15,10 @@ import com.intellij.util.ui.ColumnInfo
 import com.intellij.util.ui.JBUI
 import java.awt.Color
 import java.awt.Component
+import java.awt.Font
 import java.awt.Graphics
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import java.util.IdentityHashMap
 import java.util.TreeSet
 import javax.swing.BorderFactory
@@ -23,13 +26,31 @@ import javax.swing.Icon
 import javax.swing.JTable
 import javax.swing.JTree
 import javax.swing.SwingConstants
-import javax.swing.event.ChangeEvent
-import javax.swing.event.ListSelectionEvent
-import javax.swing.event.TableColumnModelEvent
-import javax.swing.event.TableColumnModelListener
 import javax.swing.table.DefaultTableCellRenderer
+import javax.swing.table.TableColumn
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.TreePath
+
+/**
+ * The first row of the table: the type itself, as a total.
+ *
+ * Its size and alignment sit in the columns the fields' do, so the whole reads as a sum; the name
+ * column says where the type is declared, and a click on the row goes to the declaration. The
+ * padding and the cache lines stay in the header line above the table.
+ *
+ * @param location `WorldChunk.cs:14`, or the assembly for a type with no source
+ * @param isNavigable whether a click has anywhere to go
+ */
+class SummaryRow(
+    val typeName: String,
+
+    /** `224`, or `22 + 2·n` for a string or an array whose length is not given. */
+    val sizeText: String,
+    val alignment: Int,
+    val location: String,
+    val tooltip: String?,
+    val isNavigable: Boolean,
+)
 
 /**
  * Turns a layout into the table on screen.
@@ -61,17 +82,36 @@ object LayoutTreeTable {
 
     private const val COLUMN_INDEX_TYPE = 4
 
+    /** The model index of the type column, where a click on a reference follows it. */
+    const val TYPE_COLUMN_INDEX = COLUMN_INDEX_TYPE
+
     /** Room for the sort arrow and the cell inset, on top of the text the column has to hold. */
     private const val COLUMN_SLACK = 4
 
     /**
-     * Digits a numeric column holds before it has to grow: sizes and alignments are almost always
-     * under a thousand, and an offset column wider than its numbers is just air.
+     * A numeric column starts between these two, in characters: four is `-0x8`, five is the
+     * `align` title, eight is an offset past a megabyte. Wider than that is air nobody reads.
      */
-    private const val MINIMUM_NUMBER_CHARACTERS = 3
+    private const val MINIMUM_NUMBER_CHARACTERS = 4
 
-    /** The type column never starts narrower than this, however short this type's names are. */
-    private const val MINIMUM_TYPE_CHARACTERS = 20
+    private const val MAXIMUM_NUMBER_CHARACTERS = 8
+
+    /**
+     * How much air a numeric column gets on top of its text, as a factor. The offsets get more:
+     * `0x` and a hex digit run read as one smudge when they touch the column edge.
+     */
+    private const val HEX_AIR_FACTOR = 1.7
+
+    private const val NUMBER_AIR_FACTOR = 1.5
+
+    /**
+     * The type column starts as wide as this type's longest type name, and never narrower than
+     * this: `NativeArray< BlockResourceData >` is where Unity code usually lands.
+     */
+    private const val MINIMUM_TYPE_CHARACTERS = 32
+
+    /** However far a column is dragged in, it keeps this much, so its edge can still be grabbed. */
+    private const val MINIMUM_DRAGGED_CHARACTERS = 2
 
     /** The name column is what is left, but never less than this. */
     private const val MINIMUM_NAME_CHARACTERS = 8
@@ -98,62 +138,32 @@ object LayoutTreeTable {
 
     private val bindings = java.util.WeakHashMap<TreeTable, WidthBinding>()
 
-    fun build(project: Project, layout: TypeLayout, showPadding: Boolean, cacheLineSize: Int): TreeTable {
+    fun build(
+        project: Project,
+        layout: TypeLayout,
+        summary: SummaryRow,
+        showPadding: Boolean,
+        cacheLineSize: Int,
+    ): TreeTable {
         val root = DefaultMutableTreeNode()
+        root.add(DefaultMutableTreeNode(summary))
         addNodes(root, layout.nodes, showPadding)
         val model = ListTreeTableModelOnColumns(root, columns())
-        val table = object : TreeTable(model) {
-            override fun doLayout() {
-                if (!layoutColumns(this)) {
-                    super.doLayout()
-                }
-            }
-        }
+        val table = TreeTable(model)
         table.setRootVisible(false)
         table.tree.isRootVisible = false
         table.tree.showsRootHandles = true
         table.tree.cellRenderer = NameCellRenderer(cacheLineSize)
         table.rowSelectionAllowed = true
-        // Anything but the last column keeps the width it was given; the name column takes the
-        // slack. With the default mode a drag steals from the neighbour and no width ever sticks.
+        // Every column but the name column is locked at its width (see WidthBinding), so whatever
+        // the table's own layout has to give or take can only land on the name column.
         table.autoResizeMode = JTable.AUTO_RESIZE_LAST_COLUMN
         applyRenderers(table, cacheLineSize)
-        val binding = WidthBinding(project, table, widestTexts(layout, showPadding))
+        val binding = WidthBinding(project, table, widestTexts(layout, summary, showPadding))
         bindings[table] = binding
         binding.applyStoredWidths()
         binding.attach()
         return table
-    }
-
-    /**
-     * Every column but the last at exactly its preferred width, the name column taking whatever is
-     * left. Returns false during a drag, which the table's own layout handles.
-     *
-     * `JTable` does not do this by itself, whatever its resize mode: `AUTO_RESIZE_LAST_COLUMN`
-     * only governs a drag, and every other layout -- a new tab, a resized window, a scrollbar
-     * appearing -- spreads the spare width over all the columns in proportion. That is what kept
-     * making the numeric columns wide again, and why a width dragged in one tab never showed in
-     * another: it was set as a preference and then spread away.
-     */
-    private fun layoutColumns(table: TreeTable): Boolean {
-        if (table.tableHeader?.resizingColumn != null) {
-            return false
-        }
-        val columnModel = table.columnModel
-        val columnCount = columnModel.columnCount
-        if (columnCount == 0) {
-            return true
-        }
-        var used = 0
-        for (index in 0 until columnCount - 1) {
-            val column = columnModel.getColumn(index)
-            column.width = column.preferredWidth
-            used += column.preferredWidth
-        }
-        val last = columnModel.getColumn(columnCount - 1)
-        val minimum = table.getFontMetrics(table.font).charWidth('0') * MINIMUM_NAME_CHARACTERS
-        last.width = maxOf(table.width - used, minimum)
-        return true
     }
 
     /** Lays the columns out at the widths the reader last dragged them to, in every open tab. */
@@ -170,9 +180,10 @@ object LayoutTreeTable {
      * and the reader should not have to drag a column to read a number the window already knows
      * the width of.
      */
-    private fun widestTexts(layout: TypeLayout, showPadding: Boolean): Array<String> {
+    private fun widestTexts(layout: TypeLayout, summary: SummaryRow, showPadding: Boolean): Array<String> {
         val widest = Array(COLUMN_IDS.size) { "" }
-        keepWidest(widest, COLUMN_INDEX_SIZE, layout.size.toString())
+        keepWidest(widest, COLUMN_INDEX_SIZE, summary.sizeText)
+        keepWidest(widest, COLUMN_INDEX_TYPE, summary.typeName)
         measureInto(widest, layout.nodes, showPadding)
         for (index in widest.indices) {
             val limit = MemoryLayoutStyle.COLUMN_CHARACTER_LIMITS[index]
@@ -206,11 +217,31 @@ object LayoutTreeTable {
 
     private fun columns(): Array<ColumnInfo<*, *>> {
         return arrayOf(
-            TextColumn(MemoryLayoutStyle.COLUMN_HEX) { node -> MemoryLayoutStyle.hexOffset(node.offset) },
-            TextColumn(MemoryLayoutStyle.COLUMN_DECIMAL) { node -> node.offset.toString() },
-            TextColumn(MemoryLayoutStyle.COLUMN_SIZE) { node -> sizeText(node) },
-            TextColumn(MemoryLayoutStyle.COLUMN_ALIGNMENT) { node -> alignmentText(node) },
-            TextColumn(MemoryLayoutStyle.COLUMN_TYPE) { node -> typeText(node) },
+            TextColumn(
+                MemoryLayoutStyle.COLUMN_HEX,
+                { node -> MemoryLayoutStyle.hexOffset(node.offset) },
+                { _ -> "" },
+            ),
+            TextColumn(
+                MemoryLayoutStyle.COLUMN_DECIMAL,
+                { node -> node.offset.toString() },
+                { _ -> "" },
+            ),
+            TextColumn(
+                MemoryLayoutStyle.COLUMN_SIZE,
+                { node -> sizeText(node) },
+                { summary -> summary.sizeText },
+            ),
+            TextColumn(
+                MemoryLayoutStyle.COLUMN_ALIGNMENT,
+                { node -> alignmentText(node) },
+                { summary -> summary.alignment.toString() },
+            ),
+            TextColumn(
+                MemoryLayoutStyle.COLUMN_TYPE,
+                { node -> typeText(node) },
+                { summary -> summary.typeName },
+            ),
             TreeColumnInfo(MemoryLayoutStyle.COLUMN_NAME),
         )
     }
@@ -218,6 +249,9 @@ object LayoutTreeTable {
     private fun sizeText(node: LayoutNode): String {
         if (node.kind == NodeKind.UNRESOLVED) {
             return MemoryLayoutStyle.UNKNOWN_SIZE
+        }
+        if (node.kind == NodeKind.REPEAT) {
+            return MemoryLayoutStyle.repeatSizeText(node)
         }
         return node.size.toString()
     }
@@ -233,8 +267,15 @@ object LayoutTreeTable {
         if (node.kind == NodeKind.PADDING) {
             return MemoryLayoutStyle.UNKNOWN_SIZE
         }
+        var text = node.typeName
+        if (node.kind == NodeKind.REPEAT) {
+            text = MemoryLayoutStyle.repeatTypeText(node)
+        }
         if (node.isReference) {
-            return node.typeName + "  " + MemoryLayoutStyle.REFERENCE_MARKER
+            return text + "  " + MemoryLayoutStyle.REFERENCE_MARKER + " " + MemoryLayoutStyle.FOLLOW_MARKER
+        }
+        if (node.kind == NodeKind.REPEAT) {
+            return text
         }
         if (node.kind == NodeKind.UNRESOLVED) {
             return node.typeName + "  ?"
@@ -447,6 +488,31 @@ object LayoutTreeTable {
         table.tree.rowHeight = height
     }
 
+    /** True when the point is on the type of a reference: a click there opens what it points at. */
+    fun isFollowableTypeAt(table: TreeTable, point: java.awt.Point): Boolean {
+        val row = table.rowAtPoint(point)
+        val column = table.columnAtPoint(point)
+        if (row < 0 || column < 0) {
+            return false
+        }
+        if (table.convertColumnIndexToModel(column) != TYPE_COLUMN_INDEX) {
+            return false
+        }
+        val node = nodeAt(table, row) ?: return false
+        return node.isReference && node.repeatSource == null
+    }
+
+    /** True for the total at the top, which stands for the type rather than any of its fields. */
+    fun isSummaryRow(table: TreeTable, row: Int): Boolean {
+        return summaryAt(table, row) != null
+    }
+
+    private fun summaryAt(table: TreeTable, row: Int): SummaryRow? {
+        val path: TreePath = table.tree.getPathForRow(row) ?: return null
+        val treeNode = path.lastPathComponent as? DefaultMutableTreeNode ?: return null
+        return treeNode.userObject as? SummaryRow
+    }
+
     fun nodeAt(table: TreeTable, row: Int): LayoutNode? {
         val path: TreePath = table.tree.getPathForRow(row) ?: return null
         val treeNode = path.lastPathComponent as? DefaultMutableTreeNode ?: return null
@@ -456,123 +522,169 @@ object LayoutTreeTable {
     private class TextColumn(
         name: String,
         private val textOf: (LayoutNode) -> String,
+        private val summaryTextOf: (SummaryRow) -> String,
     ) : ColumnInfo<DefaultMutableTreeNode, String>(name) {
 
         override fun valueOf(item: DefaultMutableTreeNode): String {
+            val summary = item.userObject as? SummaryRow
+            if (summary != null) {
+                return summaryTextOf(summary)
+            }
             val node = item.userObject as? LayoutNode ?: return ""
             return textOf(node)
         }
     }
 
     /**
-     * Keeps one table's column widths in step with every other open tab.
+     * Holds one table's column widths, and keeps them in step with every other open tab.
      *
-     * The width is written on every pixel of a drag rather than when the mouse comes up: there is
-     * no "drag finished" event on a column model, and the other tabs following along live is what
-     * makes it obvious the setting is shared.
+     * Every column but the name column is locked: its minimum and maximum width are both set to
+     * the width it should have. `JTable` has several layout passes of its own -- a new tab, a
+     * resized window, a scrollbar appearing, and above all the one it runs while a header reports
+     * a resizing column, which copies the current widths back into the preferred ones -- and a
+     * preferred width is only a suggestion to each of them. A locked column is not negotiable, so
+     * all of them can only move the name column, which is the one meant to take the slack.
+     *
+     * That is what went wrong before: the widths were set as preferences, a layout pass put the
+     * Swing default of 75 back, and the next drag stored those 75s as if the reader had chosen them.
+     *
+     * A drag unlocks the one column being dragged -- on the press, after the header has decided
+     * which column that is -- and locks it again at its new width on release, which is also when
+     * the width is stored and handed to the other tabs.
      */
     private class WidthBinding(
         private val project: Project,
         private val table: TreeTable,
         private val widest: Array<String>,
-    ) : TableColumnModelListener {
+    ) {
 
-        private var applying = false
+        /** The column a drag has unlocked, until the mouse comes up. */
+        private var draggedColumn: TableColumn? = null
 
         fun attach() {
-            table.columnModel.addColumnModelListener(this)
+            val header = table.tableHeader ?: return
+            val listener = object : MouseAdapter() {
+                override fun mousePressed(event: MouseEvent) {
+                    startDrag(header.resizingColumn)
+                }
+
+                /**
+                 * The header's own handler normally runs first and has named the column by the
+                 * time the press reaches here -- but a theme change installs it again, after this
+                 * one. Then the first movement of the drag is where the column becomes known.
+                 */
+                override fun mouseDragged(event: MouseEvent) {
+                    if (draggedColumn == null) {
+                        startDrag(header.resizingColumn)
+                    }
+                }
+
+                override fun mouseReleased(event: MouseEvent) {
+                    finishDrag()
+                }
+            }
+            header.addMouseListener(listener)
+            header.addMouseMotionListener(listener)
         }
 
+        /** Locks every column but the name column at its stored width, or its default one. */
         fun applyStoredWidths() {
-            applying = true
-            // The name column is not set: it takes what the others leave, see layoutColumns.
-            for (index in 0 until minOf(table.columnModel.columnCount, COLUMN_IDS.size) - 1) {
-                val column = table.columnModel.getColumn(index)
-                val needed = neededWidth(index)
-                val stored = MemoryLayoutViewState.columnWidthOf(project, COLUMN_IDS[index])
-                if (stored == MemoryLayoutViewState.NO_STORED_WIDTH) {
-                    column.preferredWidth = needed
+            val columnModel = table.columnModel
+            val lockedCount = minOf(columnModel.columnCount, COLUMN_IDS.size) - 1
+            for (index in 0 until lockedCount) {
+                val column = columnModel.getColumn(index)
+                if (column === draggedColumn) {
                     continue
                 }
-                if (index == COLUMN_INDEX_TYPE) {
-                    // A type name that does not fit is cut with an ellipsis the reader can see;
-                    // the dragged width stands.
-                    column.preferredWidth = stored
-                    continue
-                }
-                // A clipped number looks like a different number, so a numeric column grows past
-                // a dragged width when this type's numbers need it -- and only then.
-                column.preferredWidth = maxOf(stored, needed)
+                lock(column, widthOf(index))
             }
-            // A preferred width is only a wish until the table lays itself out again -- but a
-            // table that has not been shown yet has no width to distribute, and laying it out now
-            // would squash the last column to its minimum before anyone sees it.
-            if (table.width > 0) {
-                table.doLayout()
+            if (columnModel.columnCount > 0) {
+                val nameColumn = columnModel.getColumn(columnModel.columnCount - 1)
+                nameColumn.minWidth = table.getFontMetrics(table.font).charWidth('0') * MINIMUM_NAME_CHARACTERS
             }
-            applying = false
+            table.revalidate()
+            table.repaint()
+        }
+
+        private fun widthOf(index: Int): Int {
+            val stored = MemoryLayoutViewState.columnWidthOf(project, COLUMN_IDS[index])
+            if (stored == MemoryLayoutViewState.NO_STORED_WIDTH) {
+                return defaultWidth(index)
+            }
+            return maxOf(stored, minimumDraggedWidth())
+        }
+
+        private fun startDrag(column: TableColumn?) {
+            if (column == null || column.modelIndex == TREE_COLUMN_INDEX) {
+                return
+            }
+            draggedColumn = column
+            column.maxWidth = Int.MAX_VALUE
+            column.minWidth = minimumDraggedWidth()
+        }
+
+        private fun finishDrag() {
+            val column = draggedColumn ?: return
+            draggedColumn = null
+            val width = maxOf(column.width, minimumDraggedWidth())
+            lock(column, width)
+            val widths = LinkedHashMap<String, Int>()
+            val columnModel = table.columnModel
+            for (index in 0 until minOf(columnModel.columnCount, COLUMN_IDS.size) - 1) {
+                widths[COLUMN_IDS[index]] = columnModel.getColumn(index).width
+            }
+            MemoryLayoutViewState.rememberColumnWidths(project, widths, table)
         }
 
         /**
-         * What the column has to be: its widest text or its header, whichever is wider, plus air.
+         * Pins a column at one width. The order matters: `TableColumn` clamps the width and the
+         * preference into the current bounds on every change, so the bounds open first.
+         */
+        private fun lock(column: TableColumn, width: Int) {
+            column.maxWidth = Int.MAX_VALUE
+            column.minWidth = width
+            column.maxWidth = width
+            column.preferredWidth = width
+            column.width = width
+        }
+
+        /**
+         * Where a column starts before anyone drags it: its widest text or its title, whichever is
+         * wider, within the bounds of its kind.
          *
          * The widest text is measured, not counted: the table's font is the IDE's, digits in it
          * are narrower than its average character, and a count multiplied by an average width
          * pays for space no digit ever occupies.
          */
-        private fun neededWidth(index: Int): Int {
+        private fun defaultWidth(index: Int): Int {
             val metrics = table.getFontMetrics(table.font)
+            val digitWidth = metrics.charWidth('0')
             val header = metrics.stringWidth(COLUMN_TITLES[index])
             val content = metrics.stringWidth(widest[index])
-            val floor: Int
+            var width: Int
             if (index == COLUMN_INDEX_TYPE) {
-                floor = metrics.charWidth('0') * MINIMUM_TYPE_CHARACTERS
+                width = maxOf(header, content, digitWidth * MINIMUM_TYPE_CHARACTERS)
             } else {
-                floor = metrics.charWidth('0') * MINIMUM_NUMBER_CHARACTERS
+                width = maxOf(header, content, digitWidth * MINIMUM_NUMBER_CHARACTERS)
+                width = minOf(width, digitWidth * MAXIMUM_NUMBER_CHARACTERS)
+                val airFactor: Double
+                if (index == COLUMN_INDEX_HEX) {
+                    airFactor = HEX_AIR_FACTOR
+                } else {
+                    airFactor = NUMBER_AIR_FACTOR
+                }
+                width = (width * airFactor).toInt()
             }
-            var width = maxOf(header, content, floor) + JBUI.scale(COLUMN_SLACK)
+            width += JBUI.scale(COLUMN_SLACK)
             if (index == COLUMN_INDEX_ALIGNMENT || index == COLUMN_INDEX_TYPE) {
                 // Room for the rule between the numbers and the words, and the air around it.
-                width += metrics.charWidth('0') * MemoryLayoutStyle.SEPARATOR_CHARACTERS
+                width += digitWidth * MemoryLayoutStyle.SEPARATOR_CHARACTERS
             }
             return width
         }
 
-        override fun columnMarginChanged(event: ChangeEvent) {
-            if (applying) {
-                return
-            }
-            // Only a drag counts. The table fires this from its own layout as well -- resizing the
-            // window, showing a scrollbar -- and storing those meant every install ended up with
-            // a set of widths nobody chose, overriding the measured ones for good.
-            if (table.tableHeader?.resizingColumn == null) {
-                return
-            }
-            val widths = LinkedHashMap<String, Int>()
-            // A drag sets a column's width but not its preference, and the next layout -- ours,
-            // which lays columns out by preference -- would put the column straight back. So the
-            // preference follows the drag. The name column is left out: its width is the
-            // window's, not a choice.
-            applying = true
-            for (index in 0 until minOf(table.columnModel.columnCount, COLUMN_IDS.size) - 1) {
-                val column = table.columnModel.getColumn(index)
-                column.preferredWidth = column.width
-                widths[COLUMN_IDS[index]] = column.width
-            }
-            applying = false
-            MemoryLayoutViewState.rememberColumnWidths(project, widths, table)
-        }
-
-        override fun columnAdded(event: TableColumnModelEvent) {
-        }
-
-        override fun columnRemoved(event: TableColumnModelEvent) {
-        }
-
-        override fun columnMoved(event: TableColumnModelEvent) {
-        }
-
-        override fun columnSelectionChanged(event: ListSelectionEvent) {
+        private fun minimumDraggedWidth(): Int {
+            return table.getFontMetrics(table.font).charWidth('0') * MINIMUM_DRAGGED_CHARACTERS
         }
     }
 
@@ -608,6 +720,11 @@ object LayoutTreeTable {
             hasFocus: Boolean,
         ) {
             val treeNode = value as? DefaultMutableTreeNode ?: return
+            val summary = treeNode.userObject as? SummaryRow
+            if (summary != null) {
+                appendSummary(summary)
+                return
+            }
             val node = treeNode.userObject as? LayoutNode ?: return
             setIcon(levelBarOf(treeNode.level - 1))
             when (node.kind) {
@@ -645,8 +762,39 @@ object LayoutTreeTable {
             toolTipText = MemoryLayoutStyle.rowTooltip(node, cacheLineSize)
         }
 
+        /** Where the type is declared, as a link when there is somewhere to go. */
+        private fun appendSummary(summary: SummaryRow) {
+            // The renderer is shared by every row; the previous one's level bar must not stay.
+            setIcon(null)
+            val locationAttributes: SimpleTextAttributes
+            if (summary.isNavigable) {
+                locationAttributes = SimpleTextAttributes.LINK_ATTRIBUTES
+            } else {
+                locationAttributes = SimpleTextAttributes.GRAYED_ATTRIBUTES
+            }
+            append(summary.location, locationAttributes)
+            val tooltipLines = ArrayList<String>()
+            if (summary.isNavigable) {
+                tooltipLines.add(MemoryLayoutStyle.DEFINITION_TOOLTIP)
+            }
+            summary.tooltip?.let { notes ->
+                tooltipLines.add(notes)
+            }
+            if (tooltipLines.isEmpty()) {
+                toolTipText = null
+            } else {
+                toolTipText = tooltipLines.joinToString("\n")
+            }
+        }
+
         private fun appendField(node: LayoutNode) {
             append(node.fieldName, SimpleTextAttributes.REGULAR_ATTRIBUTES)
+            if (node.kind == NodeKind.REPEAT) {
+                append(
+                    "  " + MemoryLayoutStyle.STRIDE_MARKER + " " + node.repeatStride,
+                    SimpleTextAttributes.GRAYED_ATTRIBUTES,
+                )
+            }
             if (node.isAutoProperty && MemoryLayoutSettings.getInstance().markAutoProperties) {
                 append(
                     "  " + MemoryLayoutStyle.AUTO_PROPERTY_MARKER,
@@ -743,10 +891,17 @@ object LayoutTreeTable {
             borderFor(table)?.let { border ->
                 setBorder(border)
             }
+            val treeTable = table as? TreeTable
+            val isSummary = treeTable != null && isSummaryRow(treeTable, row)
+            // The total reads as a total: bold, the way a sum line is set under a column.
+            if (isSummary) {
+                font = table.font.deriveFont(Font.BOLD)
+            } else {
+                font = table.font
+            }
             if (isSelected) {
                 return component
             }
-            val treeTable = table as? TreeTable
             val node: LayoutNode?
             if (treeTable != null) {
                 node = nodeAt(treeTable, row)

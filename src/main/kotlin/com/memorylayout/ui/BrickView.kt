@@ -68,8 +68,9 @@ class BrickView : JComponent() {
                 // Through select(), not by setting the field: select() is what builds the set of
                 // highlighted nodes, and it returns early when the node has not changed. Setting
                 // the field here first made it return early every time, so a click moved nothing.
-                select(piece.node)
-                onNodeSelected?.invoke(piece.node)
+                val node = identityOf(piece.node)
+                select(node)
+                onNodeSelected?.invoke(node)
             }
         })
     }
@@ -130,7 +131,12 @@ class BrickView : JComponent() {
      * asked; the picture starts quiet and the reader's click is what turns a part of it on.
      */
     private fun isHighlighted(node: LayoutNode): Boolean {
-        return selection.containsKey(node)
+        return selection.containsKey(identityOf(node))
+    }
+
+    /** The table's node a brick stands for: itself, or the row an element copy was made from. */
+    private fun identityOf(node: LayoutNode): LayoutNode {
+        return node.repeatSource ?: node
     }
 
     /** One colour per field, in the order the fields are laid out. */
@@ -139,10 +145,11 @@ class BrickView : JComponent() {
         var index = 0
         for (row in rows) {
             for (piece in row.pieces) {
-                if (colors.containsKey(piece.node)) {
+                val node = identityOf(piece.node)
+                if (colors.containsKey(node)) {
                     continue
                 }
-                colors[piece.node] = MemoryLayoutStyle.brickColor(index)
+                colors[node] = MemoryLayoutStyle.brickColor(index)
                 index++
             }
         }
@@ -276,7 +283,7 @@ class BrickView : JComponent() {
         val height = rowHeight()
         for (index in rows.indices) {
             for (piece in rows[index].pieces) {
-                if (!selection.containsKey(piece.node)) {
+                if (!selection.containsKey(identityOf(piece.node))) {
                     continue
                 }
                 val target = Rectangle(0, edgeInset() + index * height, maxOf(width, 1), height)
@@ -418,7 +425,12 @@ class BrickView : JComponent() {
     }
 
     private fun fillOf(piece: BrickLayout.BrickPiece, isPadding: Boolean): Color {
-        val contrast = MemoryLayoutStyle.contrastFor(isHighlighted(piece.node), isPadding)
+        var contrast = MemoryLayoutStyle.contrastFor(isHighlighted(piece.node), isPadding)
+        if (piece.node.repeatCopyIndex > 0) {
+            // Element [1] onwards are the same bytes again: drawn fainter, so [0] reads as the
+            // element and the rest as its repetition.
+            contrast = contrast * REPEAT_COPY_CONTRAST / FULL_PERCENT
+        }
         return MemoryLayoutStyle.towardGrey(baseColorOf(piece, isPadding), contrast, background)
     }
 
@@ -432,7 +444,7 @@ class BrickView : JComponent() {
         if (piece.node.kind == NodeKind.RUNTIME) {
             return MemoryLayoutStyle.runtimeForeground
         }
-        return colors[piece.node] ?: MemoryLayoutStyle.brickColor(0)
+        return colors[identityOf(piece.node)] ?: MemoryLayoutStyle.brickColor(0)
     }
 
     private fun paintHatching(
@@ -469,7 +481,7 @@ class BrickView : JComponent() {
         height: Int,
         arc: Int,
     ) {
-        val selected = selection.containsKey(piece.node)
+        val selected = selection.containsKey(identityOf(piece.node))
         val split = CacheLineMath.straddlesBoundary(piece.node.offset, piece.node.size, lineSize)
         if (selected) {
             canvas.color = MemoryLayoutStyle.selectionOutline
@@ -694,6 +706,11 @@ class BrickView : JComponent() {
     }
 
     private companion object {
+        /** How much of its contrast an element copy after [0] keeps, as a percentage. */
+        const val REPEAT_COPY_CONTRAST = 45
+
+        const val FULL_PERCENT = 100
+
         const val BRICK_HEIGHT = 30
 
         const val TICK_HEIGHT = 14

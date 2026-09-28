@@ -2,6 +2,8 @@ package com.memorylayout.index
 
 import com.memorylayout.layout.LookupContext
 import com.memorylayout.layout.TypeKind
+import com.memorylayout.metadata.ClosureMatch
+import com.memorylayout.metadata.Closures
 import com.memorylayout.metadata.MetadataFormatException
 import com.memorylayout.metadata.MetadataReader
 import com.memorylayout.metadata.MetadataType
@@ -63,6 +65,80 @@ class RuntimeAssemblyService(private val project: Project) {
     val assemblies: List<String>
         get() = readAssemblies
 
+    /** A closure class found in the project's own compiled assemblies, and which file it came from. */
+    class CompiledClosure(val match: ClosureMatch, val assemblyPath: String, val assemblyModified: Long)
+
+    @Volatile
+    private var scriptLookup: MetadataTypeLookup? = null
+
+    private var scriptTypes: List<MetadataType> = emptyList()
+
+    private var scriptStamps: Map<String, Long> = emptyMap()
+
+    /**
+     * The types of `Library/ScriptAssemblies`: the project's own code as Unity last compiled it.
+     *
+     * Never mixed into [lookup] -- for a type with source, the source is the truth and these are a
+     * possibly stale copy. They are read for what only a compiler knows: the closure classes it
+     * generated. Read again whenever a file there changes, which is every Unity recompile.
+     */
+    fun scriptAssemblyLookup(): MetadataTypeLookup {
+        synchronized(lock) {
+            val stamps = scriptAssemblyStamps()
+            val loaded = scriptLookup
+            if (loaded != null && stamps == scriptStamps) {
+                return loaded
+            }
+            val types = ArrayList<MetadataType>()
+            for (path in stamps.keys) {
+                val file = File(path)
+                try {
+                    types.addAll(MetadataReader.read(file.readBytes(), file.name))
+                } catch (failure: IOException) {
+                    LOG.info("Memory Layout: cannot read $path: ${failure.message}")
+                } catch (failure: MetadataFormatException) {
+                    LOG.info("Memory Layout: $path is not a managed assembly: ${failure.message}")
+                }
+            }
+            val fresh = MetadataTypeLookup(types)
+            scriptTypes = types
+            scriptStamps = stamps
+            scriptLookup = fresh
+            return fresh
+        }
+    }
+
+    /** The closure class a lambda was compiled into, or null when the compiled code has none. */
+    fun findClosure(containerQualifiedName: String, memberName: String, capturedNames: List<String>): CompiledClosure? {
+        scriptAssemblyLookup()
+        val types: List<MetadataType>
+        val stamps: Map<String, Long>
+        synchronized(lock) {
+            types = scriptTypes
+            stamps = scriptStamps
+        }
+        val match = Closures.find(types, containerQualifiedName, memberName, capturedNames) ?: return null
+        val path = stamps.keys.firstOrNull { candidate -> File(candidate).name == match.type.assemblyName } ?: ""
+        return CompiledClosure(match, path, stamps[path] ?: 0L)
+    }
+
+    fun entryOfClosure(closure: CompiledClosure, source: ClosureSource): IndexedType {
+        return entryOf(closure.match.type).copy(closure = source)
+    }
+
+    private fun scriptAssemblyStamps(): Map<String, Long> {
+        val basePath = project.basePath ?: return emptyMap()
+        val directory = File(basePath, SCRIPT_ASSEMBLIES_PATH)
+        val files = directory.listFiles { candidate ->
+            candidate.isFile && candidate.name.endsWith(ASSEMBLY_EXTENSION, ignoreCase = true)
+        } ?: return emptyMap()
+        val stamps = LinkedHashMap<String, Long>()
+        for (file in files.sortedBy { candidate -> candidate.name }) {
+            stamps[file.path] = file.lastModified()
+        }
+        return stamps
+    }
+
     /** The written name as index entries, so the window can open a type that has no source. */
     fun candidates(typeName: String, context: LookupContext): List<IndexedType> {
         return lookup().rankedCandidates(typeName, context).map { type -> entryOf(type) }
@@ -73,8 +149,13 @@ class RuntimeAssemblyService(private val project: Project) {
     }
 
     fun declaredTypeOf(entry: IndexedType): DeclaredType? {
-        val type = lookup().typeWithFileId(entry.fileUrl) ?: return null
-        return lookup().declaredTypeOf(type)
+        val runtimeType = lookup().typeWithFileId(entry.fileUrl)
+        if (runtimeType != null) {
+            return lookup().declaredTypeOf(runtimeType)
+        }
+        val compiled = scriptAssemblyLookup()
+        val compiledType = compiled.typeWithFileId(entry.fileUrl) ?: return null
+        return compiled.declaredTypeOf(compiledType)
     }
 
     private fun entryOf(type: MetadataType): IndexedType {
@@ -152,6 +233,10 @@ class RuntimeAssemblyService(private val project: Project) {
         private val LOG = Logger.getInstance(RuntimeAssemblyService::class.java)
 
         private const val PROJECT_FILE_EXTENSION = ".csproj"
+
+        private const val SCRIPT_ASSEMBLIES_PATH = "Library/ScriptAssemblies"
+
+        private const val ASSEMBLY_EXTENSION = ".dll"
 
         private const val NO_DECLARATION_OFFSET = -1
 

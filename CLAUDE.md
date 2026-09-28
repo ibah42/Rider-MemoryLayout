@@ -324,6 +324,13 @@ The shape of the thing:
   are gone and their structs are one placeholder `int`. `ProjectReferences` swaps them for Mono's
   runtime assemblies from the same install. ReSharper's backend reads the reference ones, which is
   why its model is not the source of fields for these types either.
+- **A lambda's closure comes from the compiled assembly, never from guessing.** `Lambdas` reads the
+  source only to know what to look for -- captured names, the member under the compiler's name
+  (`.ctor`, `get_X`) -- and `Closures` finds the compiler's `<>c__DisplayClass` in
+  `Library/ScriptAssemblies` by a lambda method named after that member and by field names.
+  The script assemblies are never part of the ordinary lookup: for a type with source they are a
+  stale copy. The probe that checked this against a real project (every compiled capturing lambda
+  matched) is worth rerunning after any change to `Lambdas`.
 - **A variable's type is found by scoping, not by the nearest match.** `VariableTypes` walks back
   from the use and accepts a declaration only if its scope reaches the use: the enclosing brace
   block, or for parentheses of a method, lambda, `for`, `foreach`, `using` or `catch` the body that

@@ -20,8 +20,13 @@ import com.intellij.openapi.project.Project
 class MemoryLayoutProjectSettings : PersistentStateComponent<MemoryLayoutProjectSettings.Config> {
 
     class Config {
-        /** As `hex=40;dec=36;size=30;align=34;type=180`. The name column is never stored. */
-        var columnWidths: String = ""
+        /**
+         * As `hex=40;dec=36;size=30;align=34;type=180`. The name column is never stored.
+         *
+         * The 3 drops what earlier versions held: widths stored while the table's own layout could
+         * still put Swing's default of 75 back, so mostly 75s nobody chose.
+         */
+        var columnWidths4: String = ""
     }
 
     private var config = Config()
@@ -35,9 +40,9 @@ class MemoryLayoutProjectSettings : PersistentStateComponent<MemoryLayoutProject
     }
 
     var columnWidths: String
-        get() = config.columnWidths
+        get() = config.columnWidths4
         set(value) {
-            config.columnWidths = value
+            config.columnWidths4 = value
         }
 
     companion object {

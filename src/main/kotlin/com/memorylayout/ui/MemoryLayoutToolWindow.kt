@@ -41,7 +41,12 @@ class MemoryLayoutToolWindowFactory : ToolWindowFactory, DumbAware {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val contentManager = toolWindow.contentManager
-        contentManager.addContent(createPlaceholder())
+        // The window is filled lazily, on first show -- and the first show is usually the one
+        // `open` asks for after it has already added the type's tab. A placeholder added now would
+        // sit next to that tab as a second, empty "Memory Layout".
+        if (contentManager.contentCount == 0) {
+            contentManager.addContent(createPlaceholder())
+        }
         contentManager.addContentManagerListener(object : ContentManagerListener {
             override fun contentRemoved(event: ContentManagerEvent) {
                 if (contentManager.contentCount == 0) {

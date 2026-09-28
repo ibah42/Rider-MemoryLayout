@@ -170,7 +170,7 @@ class BrickLayoutTest {
     }
 
     @Test
-    fun aClassIsDrawnFromItsHeaderBecauseThatIsWhereItStarts() {
+    fun aClassIsDrawnFromItsHeaderAtZero() {
         val layout = layoutOf(
             """
             class AudioService
@@ -181,24 +181,23 @@ class BrickLayoutTest {
             "AudioService",
         )
         val start = BrickLayout.lowestOffset(layout.nodes)
-        assertEquals(-8, start)
+        assertEquals(0, start)
         val rows = BrickLayout.rowsOf(layout.nodes, nothingExpanded, 32, layout.size, start)
-        // The allocation is 24 bytes -- header, method table pointer, one reference -- and it
-        // begins at the header. Cut from the header it is one line with room to spare; cut from
-        // the reference, as it used to be, it looked like two lines with 24 bytes of nothing.
+        // The allocation is 24 bytes -- vtable, monitor, one reference -- in one line with room
+        // to spare.
         assertEquals(1, rows.size)
-        assertEquals(-8, rows[0].baseOffset)
+        assertEquals(0, rows[0].baseOffset)
         assertEquals(8, rows[0].spareBytes)
         assertEquals(3, rows[0].pieces.size)
-        assertEquals("object header", rows[0].pieces[0].node.fieldName)
-        assertEquals(-8, rows[0].pieces[0].offset)
-        assertEquals("type handle", rows[0].pieces[1].node.fieldName)
-        assertEquals(0, rows[0].pieces[1].offset)
+        assertEquals("vtable", rows[0].pieces[0].node.fieldName)
+        assertEquals(0, rows[0].pieces[0].offset)
+        assertEquals("monitor", rows[0].pieces[1].node.fieldName)
+        assertEquals(8, rows[0].pieces[1].offset)
         assertEquals("_logger", rows[0].pieces[2].node.fieldName)
     }
 
     @Test
-    fun aBigClassCutsItsLinesFromTheHeaderAndNotFromZero() {
+    fun aBigClassCutsItsLinesFromItsHeader() {
         val layout = layoutOf(
             """
             class Wide
@@ -216,13 +215,13 @@ class BrickLayoutTest {
             "Wide",
         )
         val start = BrickLayout.lowestOffset(layout.nodes)
-        assertEquals(-8, start)
-        // 8 bytes of header, 8 of method table pointer, 64 of fields: 80 bytes of allocation.
-        assertEquals(72, layout.size)
+        assertEquals(0, start)
+        // 16 bytes of header, 64 of fields: 80 bytes of allocation.
+        assertEquals(80, layout.size)
         val rows = BrickLayout.rowsOf(layout.nodes, nothingExpanded, 64, layout.size, start)
         assertEquals(2, rows.size)
-        assertEquals(-8, rows[0].baseOffset)
-        assertEquals(56, rows[1].baseOffset)
+        assertEquals(0, rows[0].baseOffset)
+        assertEquals(64, rows[1].baseOffset)
         assertEquals(48, rows[1].spareBytes)
     }
 
