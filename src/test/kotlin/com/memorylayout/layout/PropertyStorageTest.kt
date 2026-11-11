@@ -92,7 +92,9 @@ class PropertyStorageTest {
         val layout = layoutOf("public class Emitter { public event Action Died; public int count; }", "Emitter")
         assertTrue(fieldNames(layout).contains("Died"))
         assertEquals(8, field(layout, "Died").size)
-        assertEquals(16, field(layout, "count").offset)
+        // The delegate is a reference, so Mono puts it first, right after the 16-byte header.
+        assertEquals(16, field(layout, "Died").offset)
+        assertEquals(24, field(layout, "count").offset)
     }
 
     @Test
